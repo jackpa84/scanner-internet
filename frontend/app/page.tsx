@@ -85,9 +85,9 @@ function RiskBadge({ level, score }: { level?: string; score?: number }) {
 
 function SectionHeader({ title, desc }: { title: string; desc: string }) {
   return (
-    <div className="mb-3">
-      <h2 className="text-sm font-semibold text-foreground uppercase tracking-wider">{title}</h2>
-      <p className="text-[11px] text-muted mt-0.5">{desc}</p>
+    <div className="mb-4">
+      <h2 className="text-sm font-semibold text-[var(--foreground)] uppercase tracking-wider">{title}</h2>
+      <p className="text-[11px] text-[var(--muted)] mt-0.5">{desc}</p>
     </div>
   );
 }
@@ -152,21 +152,19 @@ export default function Home() {
   const hitRate = ss && ss.tested > 0 ? ((ss.alive / ss.tested) * 100).toFixed(1) : "0";
 
   return (
-    <main className="min-h-screen p-4 md:p-8 max-w-[1600px] mx-auto">
-      {/* Header */}
-      <header className="mb-6">
-        <div className="flex items-center justify-between">
+    <>
+      <header className="mb-8">
+        <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-bold tracking-tight md:text-3xl flex items-center">
-              Scanner de Internet
+            <h1 className="text-2xl font-bold tracking-tight text-[var(--foreground)] md:text-3xl flex items-center gap-2">
+              Monitoramento
               <LiveDot />
             </h1>
-            <p className="mt-1 text-sm text-muted max-w-2xl">
-              Varredura contínua com IPs de CIDRs hosting, BGP/RIPE, DShield, Blocklist.de e masscan.
-              Pre-scan TCP paralelo → Shodan InternetDB → IPinfo → ip-api → ThreatFox → MongoDB.
+            <p className="mt-1 text-sm text-[var(--muted)] max-w-2xl">
+              Varredura contínua: CIDRs hosting, BGP/RIPE, DShield, Blocklist.de, masscan → Shodan InternetDB → IPinfo → ThreatFox → MongoDB.
             </p>
           </div>
-          <div className="text-right text-xs text-muted shrink-0 ml-4">
+          <div className="text-right text-xs text-[var(--muted)] shrink-0">
             {lastUpdate && <p>Atualizado: {lastUpdate.toLocaleTimeString("pt-BR")}</p>}
             {newCount > 0 && (
               <p className="text-emerald-400 font-semibold animate-pulse">+{newCount} novos</p>
@@ -504,6 +502,6 @@ export default function Home() {
         items={routerInfo}
         loading={routerLoading}
       />
-    </main>
+    </>
   );
 }

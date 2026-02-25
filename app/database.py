@@ -31,6 +31,14 @@ def get_vuln_results() -> Collection:
     return get_db()["vuln_results"]
 
 
+def get_bounty_programs() -> Collection:
+    return get_db()["bounty_programs"]
+
+
+def get_bounty_targets() -> Collection:
+    return get_db()["bounty_targets"]
+
+
 def init_db():
     """Garante índices para consultas rápidas."""
     col = get_scan_results()
@@ -50,4 +58,16 @@ def init_db():
     vcol.create_index("scan_result_id", name="vidx_scan_ref", sparse=True)
     vcol.create_index("tool", name="vidx_tool")
 
-    logger.info("[DB] MongoDB conectado, indices OK (scan_results + vuln_results)")
+    bcol = get_bounty_programs()
+    bcol.create_index("name", name="bidx_name")
+    bcol.create_index("platform", name="bidx_platform")
+    bcol.create_index("status", name="bidx_status")
+
+    tcol = get_bounty_targets()
+    tcol.create_index("program_id", name="tidx_program")
+    tcol.create_index("domain", name="tidx_domain")
+    tcol.create_index([("program_id", 1), ("domain", 1)], name="tidx_prog_domain", unique=True)
+    tcol.create_index("alive", name="tidx_alive")
+    tcol.create_index("status", name="tidx_status")
+
+    logger.info("[DB] MongoDB conectado, indices OK (scan_results + vuln_results + bounty)")

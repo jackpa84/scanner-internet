@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanner-frontend
+  labels:
+    app: scanner-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scanner-frontend
+  template:
+    metadata:
+      labels:
+        app: scanner-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: scanner-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: http://app:5000
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  selector:
+    app: scanner-frontend
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      nodePort: 30080
+  type: NodePort
+  externalTrafficPolicy: Cluster
+  # kind expõe host 3000 -> nodePort 30080
+

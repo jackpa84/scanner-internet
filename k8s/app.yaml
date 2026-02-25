@@ -1,0 +1,111 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scanner-app
+  labels:
+    app: scanner-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scanner-app
+  template:
+    metadata:
+      labels:
+        app: scanner-app
+    spec:
+      containers:
+        - name: app
+          image: scanner-app:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5000
+          env:
+            - name: MONGODB_URI
+              value: mongodb://user:password@db.default.svc.cluster.local.:27017/scanner_db?authSource=admin
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: NETWORK_SCANNER_ENABLED
+              value: "false"
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NUM_WORKERS
+              value: "200"
+            - name: SCAN_INTERVAL
+              value: "0.2"
+            - name: SHODAN_RPS
+              value: "10"
+            - name: IPAPI_RPS
+              value: "0.7"
+            - name: IPINFO_RPS
+              value: "0.8"
+            - name: PRESCAN_TIMEOUT
+              value: "0.8"
+            - name: MASSCAN_ENABLED
+              value: "auto"
+            - name: MASSCAN_RATE
+              value: "10000"
+            - name: ABUSEIPDB_KEY
+              value: ""
+            - name: IPINFO_TOKEN
+              value: ""
+            - name: VULN_WORKERS
+              value: "3"
+            - name: VULN_AUTO_SCAN
+              value: "false"
+            - name: VULN_AUTO_MIN_SCORE
+              value: "70"
+            - name: NUCLEI_SEVERITY
+              value: "critical,high,medium"
+            - name: NUCLEI_TIMEOUT
+              value: "120"
+            - name: NMAP_TIMEOUT
+              value: "180"
+            - name: BOUNTY_MODE
+              value: "true"
+            - name: BOUNTY_RECON_INTERVAL
+              value: "21600"
+            - name: BOUNTY_RECON_WORKERS
+              value: "2"
+            - name: SUBFINDER_TIMEOUT
+              value: "300"
+            - name: HTTP_PORT_SCANNER_ENABLED
+              value: "true"
+            - name: BUG_SCRAPER_PATH
+              value: "/opt/Bug_Scraper/bug-scraper.py"
+            - name: BUG_SCRAPER_ARGS
+              value: "--mode discovery --output json"
+            - name: HTTP_PORT_SCANNER_PATH
+              value: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
+            - name: HACKERONE_API_USERNAME
+              value: "jackpa"
+            - name: HACKERONE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hackerone-api
+                  key: token
+                  optional: true
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+spec:
+  selector:
+    app: scanner-app
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      nodePort: 30500
+  type: NodePort
+  externalTrafficPolicy: Cluster
+  # kind expõe host 5000 -> nodePort 30500
+

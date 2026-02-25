@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
+import DesktopLayout from "@/components/DesktopLayout";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Scanner Internet - Dashboard",
-  description: "Dashboard de varredura Shodan InternetDB",
+  title: "Scanner Bounty - Monitoramento e HackerOne",
+  description: "Varredura Shodan, bug bounty, recon e envio de reports ao HackerOne",
 };
 
 export default function RootLayout({
@@ -16,8 +17,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR" className="dark">
-      <body className={`${inter.className} antialiased min-h-screen bg-background text-foreground`}>
-        {children}
+      <body className={`${inter.className} antialiased`}>
+        <DesktopLayout>{children}</DesktopLayout>
       </body>
     </html>
   );

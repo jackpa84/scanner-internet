@@ -67,32 +67,51 @@ def _mark_scanned(ip: str) -> None:
         _scanned_ips.add(ip)
 
 
-def enqueue_ip(ip: str, score: int = 50, scan_result_id: str | None = None) -> bool:
+def enqueue_ip(ip: str, score: int = 50, scan_result_id: str | None = None, hostname: str | None = None) -> bool:
     """Add an IP to the vuln scan queue. Returns False if already queued/scanned or queue full."""
-    if _already_scanned(ip):
+    key = hostname or ip
+    if _already_scanned(key):
         return False
     try:
-        _vuln_queue.put_nowait((-score, ip, scan_result_id))
+        _vuln_queue.put_nowait((-score, ip, scan_result_id, hostname))
         _inc_stat("queued")
         return True
     except queue.Full:
         return False
 
 
+def enqueue_bounty_target(domain: str, ips: list[str], httpx_data: dict | None = None) -> bool:
+    """Enqueue a bounty target (domain + IPs) for vuln scanning."""
+    ip = ips[0] if ips else ""
+    if not ip and not domain:
+        return False
+    return enqueue_ip(ip or domain, score=80, hostname=domain)
+
+
 # ---------------------------------------------------------------------------
 # Nuclei
 # ---------------------------------------------------------------------------
-def run_nuclei_scan(ip: str, ports: list[int] | None = None, cves: list[str] | None = None) -> list[dict]:
+def run_nuclei_scan(ip: str, ports: list[int] | None = None, cves: list[str] | None = None, hostname: str | None = None) -> list[dict]:
     """Run nuclei against an IP/host and return parsed findings."""
     targets = []
     http_ports = {80, 443, 8080, 8443, 8000, 8888, 9090, 3000, 5000}
     scan_ports = set(ports or [])
+    host = hostname or ip
 
-    for p in scan_ports & http_ports:
-        scheme = "https" if p in (443, 8443) else "http"
-        targets.append(f"{scheme}://{ip}:{p}")
+    if hostname:
+        targets.append(f"https://{hostname}")
+        targets.append(f"http://{hostname}")
+        for p in scan_ports & http_ports:
+            if p not in (80, 443):
+                scheme = "https" if p in (443, 8443) else "http"
+                targets.append(f"{scheme}://{hostname}:{p}")
+    else:
+        for p in scan_ports & http_ports:
+            scheme = "https" if p in (443, 8443) else "http"
+            targets.append(f"{scheme}://{ip}:{p}")
+
     if not targets:
-        targets.append(ip)
+        targets.append(host)
 
     cmd = [
         "nuclei",
@@ -291,10 +310,10 @@ def _nmap_severity(script_id: str, output: str) -> str:
 # ---------------------------------------------------------------------------
 # Scan pipeline
 # ---------------------------------------------------------------------------
-def _vuln_scan_ip(ip: str, scan_result_id: str | None = None) -> int:
+def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | None = None) -> int:
     """Run full vuln scan (nuclei + nmap) on a single IP, save results. Returns vuln count."""
     _inc_stat("scanning")
-    _mark_scanned(ip)
+    _mark_scanned(hostname or ip)
 
     col = get_scan_results()
     doc = col.find_one({"ip": ip}, {"ports": 1, "vulns": 1})
@@ -310,7 +329,7 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None) -> int:
     elif doc:
         ref_id = doc.get("_id")
 
-    nuclei_findings = run_nuclei_scan(ip, ports, cves)
+    nuclei_findings = run_nuclei_scan(ip, ports, cves, hostname=hostname)
     nmap_findings = run_nmap_deep(ip, ports)
 
     all_findings = nuclei_findings + nmap_findings
@@ -322,6 +341,7 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None) -> int:
         for f in all_findings:
             vuln_doc = {
                 "ip": ip,
+                "hostname": hostname or "",
                 "scan_result_id": ref_id,
                 "tool": f["tool"],
                 "template_id": f["template_id"],
@@ -353,7 +373,8 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None) -> int:
         sev_summary[s] = sev_summary.get(s, 0) + 1
     sev_str = " ".join(f"{k}:{v}" for k, v in sorted(sev_summary.items())) if sev_summary else "nenhuma"
 
-    logger.info("[VULN] %-15s  %d achados (%s)  nuclei:%d nmap:%d", ip, saved, sev_str, len(nuclei_findings), len(nmap_findings))
+    target_label = f"{hostname} ({ip})" if hostname else ip
+    logger.info("[VULN] %-30s  %d achados (%s)  nuclei:%d nmap:%d", target_label, saved, sev_str, len(nuclei_findings), len(nmap_findings))
     return saved
 
 
@@ -364,14 +385,17 @@ def _vuln_worker(worker_id: int) -> None:
     """Worker loop that consumes IPs from the vuln queue."""
     while True:
         try:
-            priority, ip, scan_result_id = _vuln_queue.get(timeout=10)
+            item = _vuln_queue.get(timeout=10)
         except queue.Empty:
             continue
 
+        priority, ip, scan_result_id = item[0], item[1], item[2]
+        hostname = item[3] if len(item) > 3 else None
+
         try:
-            _vuln_scan_ip(ip, scan_result_id)
+            _vuln_scan_ip(ip, scan_result_id, hostname=hostname)
         except Exception as e:
-            logger.error("[VULN] W%d erro em %s: %s", worker_id, ip, e)
+            logger.error("[VULN] W%d erro em %s: %s", worker_id, hostname or ip, e)
             _inc_stat("errors")
         finally:
             _vuln_queue.task_done()

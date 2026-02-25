@@ -40,3 +40,15 @@ Este projeto realiza varreduras aleatórias de IPs públicos, consulta o serviç
    ```
 
    Acesse [http://localhost:3000](http://localhost:3000). Configure `NEXT_PUBLIC_API_URL=http://localhost:5000` em `frontend/.env.local` se a API estiver em outra URL. O FastAPI já envia CORS para `http://localhost:3000` em desenvolvimento.
+
+## Como usar para ganhar dinheiro com HackerOne
+
+1. **Ver escopo no HackerOne** — Na página do programa (Scope), anote ativos In scope + Eligible.
+2. **Cadastrar programa** — No app, **Programas** → **+ Novo Programa** (nome, HackerOne, URL do programa, in_scope) ou **Importar CSV**.
+3. **Descobrir alvos** — Clique em **Recon**; espere terminar e expanda o programa para ver **targets** e a coluna **Checks**.
+4. **Priorizar** — Use o **Plano de Caça** (top 5 por risco) e o filtro **somente HIGH**; opcional: **Exportar top-targets**.
+5. **Validar** — **Abrir** o target, reproduzir o bug sem sair do escopo.
+6. **Enviar** — **Template** (revisar) e **Enviar ao H1** quando o botão habilitar (exige ao menos 1 finding com título e evidência).
+7. **Receber** — No HackerOne: triagem, aceite e pagamento conforme a tabela Rewards do programa.
+
+Configure `HACKERONE_API_USERNAME` e `HACKERONE_API_TOKEN` no `.env` (raiz do projeto) para enviar reports direto pelo botão **Enviar ao H1**.

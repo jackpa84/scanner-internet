@@ -14,7 +14,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends masscan nmap wget unzip \
+    && apt-get install -y --no-install-recommends masscan nmap wget unzip dnsutils \
     && NUCLEI_VERSION=$(wget -qO- "https://api.github.com/repos/projectdiscovery/nuclei/releases/latest" \
        | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
     && wget -q "https://github.com/projectdiscovery/nuclei/releases/download/${NUCLEI_VERSION}/nuclei_${NUCLEI_VERSION#v}_linux_amd64.zip" \
@@ -23,6 +23,20 @@ RUN apt-get update \
     && chmod +x /usr/local/bin/nuclei \
     && rm /tmp/nuclei.zip \
     && nuclei -ut -silent \
+    && SUBFINDER_VERSION=$(wget -qO- "https://api.github.com/repos/projectdiscovery/subfinder/releases/latest" \
+       | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
+    && wget -q "https://github.com/projectdiscovery/subfinder/releases/download/${SUBFINDER_VERSION}/subfinder_${SUBFINDER_VERSION#v}_linux_amd64.zip" \
+       -O /tmp/subfinder.zip \
+    && unzip -o /tmp/subfinder.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/subfinder \
+    && rm /tmp/subfinder.zip \
+    && HTTPX_VERSION=$(wget -qO- "https://api.github.com/repos/projectdiscovery/httpx/releases/latest" \
+       | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
+    && wget -q "https://github.com/projectdiscovery/httpx/releases/download/${HTTPX_VERSION}/httpx_${HTTPX_VERSION#v}_linux_amd64.zip" \
+       -O /tmp/httpx.zip \
+    && unzip -o /tmp/httpx.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/httpx \
+    && rm /tmp/httpx.zip \
     && apt-get purge -y wget unzip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
