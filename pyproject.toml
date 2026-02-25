@@ -1,0 +1,21 @@
+[tool.poetry]
+name = "scanner-internet"
+version = "0.1.0"
+description = "Varredura aleatória de IPs com armazenamento em banco e dashboard"
+authors = ["Seu Nome <email@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+requests = "^2.31.0"
+pymongo = "^4.6.0"
+fastapi = "^0.109.0"
+uvicorn = {extras = ["standard"], version = "^0.27.0"}
+python-dotenv = "^1.0.0"
+schedule = "^1.2.0"
+
+[tool.poetry.dev-dependencies]
+pytest = "^7.4.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

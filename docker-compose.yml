@@ -1,0 +1,83 @@
+services:
+  db:
+    image: mongo:7
+    container_name: scanner_db
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: user
+      MONGO_INITDB_ROOT_PASSWORD: password
+      MONGO_INITDB_DATABASE: scanner_db
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  app:
+    build: .
+    container_name: scanner_app
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    environment:
+      MONGODB_URI: mongodb://user:password@db:27017/scanner_db?authSource=admin
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+      NUM_WORKERS: "200"
+      SCAN_INTERVAL: "0.2"
+      SHODAN_RPS: "10"
+      IPAPI_RPS: "0.7"
+      IPINFO_RPS: "0.8"
+      PRESCAN_TIMEOUT: "0.8"
+      MASSCAN_ENABLED: "auto"
+      MASSCAN_RATE: "10000"
+      ABUSEIPDB_KEY: ""
+      IPINFO_TOKEN: ""
+      VULN_WORKERS: "3"
+      VULN_AUTO_SCAN: "true"
+      VULN_AUTO_MIN_SCORE: "70"
+      NUCLEI_SEVERITY: "critical,high,medium"
+      NUCLEI_TIMEOUT: "120"
+      NMAP_TIMEOUT: "180"
+    volumes:
+      - ./app:/app/app
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "debug"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  frontend:
+    build: ./frontend
+    container_name: scanner_frontend
+    depends_on:
+      - app
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:5000
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mongo_data:
