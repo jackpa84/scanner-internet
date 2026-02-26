@@ -1,13 +1,10 @@
 import type { Metadata } from "next";
-import { Inter } from "next/font/google";
 import "./globals.css";
 import AuthGate from "@/components/AuthGate";
 
-const inter = Inter({ subsets: ["latin"] });
-
 export const metadata: Metadata = {
-  title: "Scanner Bounty - Monitoramento e HackerOne",
-  description: "Varredura Shodan, bug bounty, recon e envio de reports ao HackerOne",
+  title: "Scanner Bounty - HackerOne",
+  description: "Bug bounty recon, scan e envio de reports ao HackerOne",
 };
 
 export default function RootLayout({
@@ -17,7 +14,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR" className="dark">
-      <body className={`${inter.className} antialiased`}>
+      <body className="font-sans antialiased">
         <AuthGate>{children}</AuthGate>
       </body>
     </html>
