@@ -82,10 +82,10 @@ def enqueue_ip(ip: str, score: int = 50, scan_result_id: str | None = None, host
 
 def enqueue_bounty_target(domain: str, ips: list[str], httpx_data: dict | None = None) -> bool:
     """Enqueue a bounty target (domain + IPs) for vuln scanning."""
-    ip = ips[0] if ips else ""
-    if not ip and not domain:
+    if not domain:
         return False
-    return enqueue_ip(ip or domain, score=80, hostname=domain)
+    ip = ips[0] if ips else domain
+    return enqueue_ip(ip, score=80, hostname=domain)
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +317,7 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | No
 
     col = get_scan_results()
     doc = col.find_one({"ip": ip}, {"ports": 1, "vulns": 1})
-    ports = doc.get("ports", []) if doc else []
+    ports = doc.get("ports", []) if doc else [80, 443, 8080, 8443]
     cves = doc.get("vulns", []) if doc else []
 
     ref_id = None
@@ -329,8 +329,9 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | No
     elif doc:
         ref_id = doc.get("_id")
 
-    nuclei_findings = run_nuclei_scan(ip, ports, cves, hostname=hostname)
-    nmap_findings = run_nmap_deep(ip, ports)
+    target = hostname or ip
+    nuclei_findings = run_nuclei_scan(target, ports, cves, hostname=hostname)
+    nmap_findings = run_nmap_deep(ip, ports) if ip != hostname else []
 
     all_findings = nuclei_findings + nmap_findings
     saved = 0
@@ -402,7 +403,7 @@ def _vuln_worker(worker_id: int) -> None:
 
 
 def _auto_enqueue_loop() -> None:
-    """Periodically check scan_results for high-risk IPs and enqueue for vuln scanning."""
+    """Periodically check scan_results + bounty_targets for vuln scanning."""
     logger.info("[VULN] auto-enqueue ativo (min_score=%d)", AUTO_MIN_SCORE)
     while True:
         try:
@@ -420,8 +421,24 @@ def _auto_enqueue_loop() -> None:
                     sid = str(doc["_id"])
                     if enqueue_ip(ip, score, sid):
                         enqueued += 1
+
+            try:
+                from app.database import get_bounty_targets
+                tcol = get_bounty_targets()
+                for t in tcol.find(
+                    {"alive": True, "recon_checks.risk_score": {"$gte": 20}},
+                    {"domain": 1, "ips": 1},
+                ).sort("recon_checks.risk_score", -1).limit(30):
+                    domain = t.get("domain", "")
+                    if domain and not _already_scanned(domain):
+                        ips = t.get("ips", [])
+                        if enqueue_bounty_target(domain, ips):
+                            enqueued += 1
+            except Exception:
+                pass
+
             if enqueued:
-                logger.info("[VULN] auto-enqueue: +%d IPs na fila", enqueued)
+                logger.info("[VULN] auto-enqueue: +%d IPs/targets na fila", enqueued)
         except Exception as e:
             logger.error("[VULN] auto-enqueue erro: %s", e)
 
