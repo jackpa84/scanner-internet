@@ -2,7 +2,7 @@ services:
   db:
     image: mongo:7
     container_name: scanner_db
-    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "0.25"]
+    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
     environment:
       MONGO_INITDB_ROOT_USERNAME: user
       MONGO_INITDB_ROOT_PASSWORD: password
@@ -40,21 +40,21 @@ services:
       AUTH_PASSWORD: "scanner2026"
       MONGODB_URI: mongodb://user:password@db:27017/scanner_db?authSource=admin
       LOG_LEVEL: "INFO"
-      NETWORK_SCANNER_ENABLED: "false"
+      NETWORK_SCANNER_ENABLED: "true"
       PYTHONUNBUFFERED: "1"
-      NUM_WORKERS: "200"
-      SCAN_INTERVAL: "0.2"
-      SHODAN_RPS: "10"
-      IPAPI_RPS: "0.7"
-      IPINFO_RPS: "0.8"
-      PRESCAN_TIMEOUT: "0.8"
+      NUM_WORKERS: "50"
+      SCAN_INTERVAL: "0.05"
+      SHODAN_RPS: "15"
+      IPAPI_RPS: "1.2"
+      IPINFO_RPS: "1.2"
+      PRESCAN_TIMEOUT: "0.5"
       MASSCAN_ENABLED: "auto"
-      MASSCAN_RATE: "10000"
+      MASSCAN_RATE: "50000"
       ABUSEIPDB_KEY: ""
       IPINFO_TOKEN: ""
-      VULN_WORKERS: "3"
-      VULN_AUTO_SCAN: "false"
-      VULN_AUTO_MIN_SCORE: "70"
+      VULN_WORKERS: "4"
+      VULN_AUTO_SCAN: "true"
+      VULN_AUTO_MIN_SCORE: "60"
       NUCLEI_SEVERITY: "critical,high,medium"
       NUCLEI_TIMEOUT: "120"
       NMAP_TIMEOUT: "180"

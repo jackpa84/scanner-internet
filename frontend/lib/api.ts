@@ -76,6 +76,35 @@ const API_POST = async <T>(path: string, body: Record<string, unknown>): Promise
 };
 
 // ---------------------------------------------------------------------------
+// Health / Circuit Breakers
+// ---------------------------------------------------------------------------
+export interface ApiBreakerStatus {
+  name: string;
+  blocked: boolean;
+  cooldown: number;
+  remaining_seconds: number;
+  blocked_since: string;
+}
+
+export interface ScanStats {
+  tested: number;
+  alive: number;
+  saved: number;
+  dead: number;
+}
+
+export interface HealthInfo {
+  workers: number;
+  scan_interval: number;
+  network_scanner_enabled: boolean;
+  apis: ApiBreakerStatus[];
+  blocked_count: number;
+  scan_stats: ScanStats;
+}
+
+export const fetchHealth = () => apiFetch<HealthInfo>("/api/health");
+
+// ---------------------------------------------------------------------------
 // Vuln Scanner (used by VulnPanel)
 // ---------------------------------------------------------------------------
 export interface VulnResult {

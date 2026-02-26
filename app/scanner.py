@@ -36,7 +36,7 @@ SOCKET_TIMEOUT = 4
 PRESCAN_TIMEOUT = float(os.getenv("PRESCAN_TIMEOUT", "0.8"))
 MAX_RETRIES = 2
 HIGH_RISK_PORTS = {21, 22, 23, 445, 3389, 5900, 8080, 8443}
-PRESCAN_PORTS = [80, 443, 22, 8080, 23, 21, 3389, 8443, 25, 53]
+PRESCAN_PORTS = [80, 443, 22, 8080, 23, 21, 3389, 8443, 25, 53, 3306, 5432, 6379, 27017, 9200]
 
 IPINFO_TOKEN = os.getenv("IPINFO_TOKEN", "")
 
@@ -105,7 +105,7 @@ def quick_port_scan(ip: str) -> list[int]:
     threads = [threading.Thread(target=_check, args=(p,), daemon=True) for p in PRESCAN_PORTS]
     for t in threads:
         t.start()
-    deadline = PRESCAN_TIMEOUT + 0.5
+    deadline = PRESCAN_TIMEOUT + 0.2
     for t in threads:
         t.join(timeout=deadline)
     return sorted(open_ports)
@@ -482,10 +482,37 @@ def scan_and_save_once(worker_id: int) -> bool:
     for info in router_info_list:
         info.pop("timestamp", None)
 
-    geo = query_ipinfo(ip)
-    network_info = query_ipapi(ip)
-    threat_intel = query_threatfox(ip)
-    rdns = query_reverse_dns(ip)
+    geo: dict[str, Any] = {}
+    network_info: dict[str, Any] = {}
+    threat_intel: dict[str, Any] = {}
+    rdns = ""
+
+    def _q_geo() -> None:
+        nonlocal geo
+        geo = query_ipinfo(ip)
+
+    def _q_net() -> None:
+        nonlocal network_info
+        network_info = query_ipapi(ip)
+
+    def _q_threat() -> None:
+        nonlocal threat_intel
+        threat_intel = query_threatfox(ip)
+
+    def _q_rdns() -> None:
+        nonlocal rdns
+        rdns = query_reverse_dns(ip)
+
+    enrich_threads = [
+        threading.Thread(target=_q_geo, daemon=True),
+        threading.Thread(target=_q_net, daemon=True),
+        threading.Thread(target=_q_threat, daemon=True),
+        threading.Thread(target=_q_rdns, daemon=True),
+    ]
+    for et in enrich_threads:
+        et.start()
+    for et in enrich_threads:
+        et.join(timeout=8)
 
     if geo and network_info:
         geo["isp"] = network_info.get("isp", "")
@@ -546,10 +573,14 @@ def scan_and_save_once(worker_id: int) -> bool:
 def _worker_loop(worker_id: int) -> None:
     while True:
         try:
-            scan_and_save_once(worker_id)
+            found = scan_and_save_once(worker_id)
+            if not found:
+                time.sleep(SCAN_INTERVAL * 0.25)
+            else:
+                time.sleep(SCAN_INTERVAL)
         except Exception as e:
             logger.error("[!] W%s: %s", worker_id, e)
-        time.sleep(SCAN_INTERVAL)
+            time.sleep(0.5)
 
 
 def run_scanner(num_workers: int = NUM_SCANNER_WORKERS, interval: float | None = None) -> None:
