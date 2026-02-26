@@ -39,6 +39,10 @@ def get_bounty_targets() -> Collection:
     return get_db()["bounty_targets"]
 
 
+def get_bounty_changes() -> Collection:
+    return get_db()["bounty_changes"]
+
+
 def init_db():
     """Garante índices para consultas rápidas."""
     col = get_scan_results()
@@ -69,5 +73,10 @@ def init_db():
     tcol.create_index([("program_id", 1), ("domain", 1)], name="tidx_prog_domain", unique=True)
     tcol.create_index("alive", name="tidx_alive")
     tcol.create_index("status", name="tidx_status")
+    tcol.create_index("is_new", name="tidx_is_new", sparse=True)
 
-    logger.info("[DB] MongoDB conectado, indices OK (scan_results + vuln_results + bounty)")
+    ccol = get_bounty_changes()
+    ccol.create_index("program_id", name="cidx_program")
+    ccol.create_index("timestamp", name="cidx_timestamp")
+
+    logger.info("[DB] MongoDB conectado, indices OK (scan_results + vuln_results + bounty + changes)")

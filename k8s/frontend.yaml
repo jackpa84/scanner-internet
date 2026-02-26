@@ -22,7 +22,7 @@ spec:
             - containerPort: 3000
           env:
             - name: NEXT_PUBLIC_API_URL
-              value: http://app:5000
+              value: http://localhost:5001
           resources:
             requests:
               cpu: "200m"

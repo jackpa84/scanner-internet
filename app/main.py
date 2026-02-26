@@ -17,7 +17,7 @@ from fastapi.responses import PlainTextResponse
 
 from app.database import (
     init_db, get_scan_results, get_vuln_results,
-    get_bounty_programs, get_bounty_targets,
+    get_bounty_programs, get_bounty_targets, get_bounty_changes,
 )
 from app.scanner import (
     run_scanner, NUM_SCANNER_WORKERS, SCAN_INTERVAL, SHODAN_RPS, IPAPI_RPS, IPINFO_RPS,
@@ -37,6 +37,7 @@ from app.bounty import (
     BOUNTY_MODE,
 )
 from app.bug_scraper_integration import sync_bug_scraper_programs
+from app.auth import AuthMiddleware, authenticate, AUTH_USERNAME
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 NETWORK_SCANNER_ENABLED = os.getenv("NETWORK_SCANNER_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -73,10 +74,11 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
         return response
 
 app.add_middleware(RequestLogMiddleware)
+app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=False,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -175,6 +177,16 @@ def api_prioritized_findings(limit: int = 20, min_score: int = 40):
         results = fallback[:limit]
 
     return results
+
+
+@app.post("/api/auth/login")
+def api_auth_login(body: dict):
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    token = authenticate(username, password)
+    if not token:
+        raise HTTPException(status_code=401, detail="Usuario ou senha incorretos")
+    return {"token": token, "username": username}
 
 
 @app.get("/api/health")
@@ -723,6 +735,52 @@ def api_bounty_bug_scraper_sync():
     return {"inserted": inserted}
 
 
+@app.get("/api/bounty/programs/{program_id}/changes")
+def api_bounty_program_changes(program_id: str, limit: int = 20):
+    """Return recent subdomain changes (new/removed) for a bounty program."""
+    try:
+        oid = ObjectId(program_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid program id")
+    ccol = get_bounty_changes()
+    cursor = ccol.find({"program_id": oid}).sort("timestamp", -1).limit(max(1, min(limit, 100)))
+    results = []
+    for doc in cursor:
+        d = dict(doc)
+        d["id"] = str(d.pop("_id", ""))
+        d["program_id"] = str(d.get("program_id", ""))
+        ts = d.get("timestamp")
+        if ts and hasattr(ts, "isoformat"):
+            d["timestamp"] = ts.isoformat() + "Z"
+        results.append(d)
+    return results
+
+
+@app.get("/api/bounty/changes/recent")
+def api_bounty_recent_changes(limit: int = 50):
+    """Return the most recent subdomain changes across all programs."""
+    ccol = get_bounty_changes()
+    cursor = ccol.find().sort("timestamp", -1).limit(max(1, min(limit, 200)))
+    results = []
+    for doc in cursor:
+        d = dict(doc)
+        d["id"] = str(d.pop("_id", ""))
+        d["program_id"] = str(d.get("program_id", ""))
+        ts = d.get("timestamp")
+        if ts and hasattr(ts, "isoformat"):
+            d["timestamp"] = ts.isoformat() + "Z"
+        results.append(d)
+    return results
+
+
+@app.get("/api/bounty/targets/new")
+def api_bounty_new_targets(limit: int = 100):
+    """Return targets flagged as new (discovered in the latest recon run)."""
+    tcol = get_bounty_targets()
+    cursor = tcol.find({"is_new": True, "alive": True}).sort("last_recon", -1).limit(max(1, min(limit, 500)))
+    return [_serialize_bounty_doc(doc) for doc in cursor]
+
+
 def _hackerone_handle_from_url(program_url: str) -> str | None:
     """Extract team handle from HackerOne program URL (e.g. https://hackerone.com/company -> company)."""
     if not program_url or "hackerone.com" not in (program_url or "").lower():
@@ -817,10 +875,17 @@ def api_bounty_stats():
     recon = get_recon_stats()
     pcol = get_bounty_programs()
     tcol = get_bounty_targets()
+    ccol = get_bounty_changes()
+    from app.ip_feeds import get_feed_stats as _get_feed_stats
+    feed = _get_feed_stats()
     return {
         "programs": pcol.count_documents({}),
+        "programs_with_bounty": pcol.count_documents({"has_bounty": True}),
         "targets": tcol.count_documents({}),
         "alive_targets": tcol.count_documents({"alive": True}),
+        "new_targets": tcol.count_documents({"is_new": True}),
+        "total_changes": ccol.count_documents({}),
+        "bounty_prefixes": feed.get("bounty_prefixes", 0),
         "recon": recon,
     }
 

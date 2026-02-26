@@ -1,13 +1,17 @@
 """
-Geração inteligente de IPs com múltiplas fontes.
+Geração inteligente de IPs com múltiplas fontes + ASN discovery para bounty.
 
-Fontes:
-  1. CIDR blocks densos (hosting/cloud) — hit rate ~30-50%
+Fontes gerais (network scanner):
+  1. CIDR blocks densos (hosting/cloud)
   2. RIPE Stat API — prefixos BGP anunciados por ASNs populares
   3. DShield/SANS — top IPs atacando a internet (sem chave)
   4. Blocklist.de — IPs abusivos reportados (sem chave)
-  5. AbuseIPDB (opcional, com chave) — IPs reportados
-  6. masscan (opcional) — SYN scan em massa alimentando a fila
+  5. AbuseIPDB (opcional, com chave)
+  6. masscan (opcional) — SYN scan em massa
+
+Fontes bounty-aware:
+  7. ASN discovery — descobre ASNs dos alvos de bounty e enumera prefixos
+  8. Bounty target feed — prioriza IPs de organizações com programas ativos
 """
 
 import ipaddress
@@ -48,24 +52,20 @@ def is_public(ip_str: str) -> bool:
 
 # --- Hosting provider CIDR blocks (alta densidade de hosts ativos) ---
 HOSTING_CIDRS = [
-    # DigitalOcean
     "45.55.0.0/16", "46.101.0.0/16", "64.225.0.0/16", "68.183.0.0/16",
     "104.131.0.0/16", "134.209.0.0/16", "137.184.0.0/16", "138.197.0.0/16",
     "139.59.0.0/16", "143.198.0.0/16", "157.245.0.0/16", "159.65.0.0/16",
     "159.89.0.0/16", "161.35.0.0/16", "165.22.0.0/16", "167.71.0.0/16",
     "167.172.0.0/16", "174.138.0.0/16", "178.128.0.0/16",
-    # Vultr
     "45.32.0.0/16", "45.63.0.0/16", "45.76.0.0/16", "45.77.0.0/16",
     "64.176.0.0/16", "66.42.0.0/16", "78.141.0.0/16", "95.179.0.0/16",
     "108.61.0.0/16", "136.244.0.0/16", "140.82.0.0/16", "149.28.0.0/16",
     "155.138.0.0/16", "207.148.0.0/16",
-    # Hetzner
     "5.9.0.0/16", "78.46.0.0/15", "88.99.0.0/16", "88.198.0.0/16",
     "116.202.0.0/16", "116.203.0.0/16", "135.181.0.0/16", "136.243.0.0/16",
     "138.201.0.0/16", "142.132.0.0/16", "144.76.0.0/16", "148.251.0.0/16",
     "159.69.0.0/16", "167.235.0.0/16", "168.119.0.0/16", "176.9.0.0/16",
     "178.63.0.0/16", "195.201.0.0/16",
-    # OVH
     "5.39.0.0/16", "5.135.0.0/16", "5.196.0.0/16", "37.59.0.0/16",
     "37.187.0.0/16", "46.105.0.0/16", "51.38.0.0/16", "51.68.0.0/16",
     "51.75.0.0/16", "51.77.0.0/16", "51.79.0.0/16", "51.83.0.0/16",
@@ -73,20 +73,14 @@ HOSTING_CIDRS = [
     "54.38.0.0/16", "87.98.0.0/16", "91.121.0.0/16", "137.74.0.0/16",
     "145.239.0.0/16", "147.135.0.0/16", "149.56.0.0/16", "158.69.0.0/16",
     "164.132.0.0/16", "176.31.0.0/16", "178.32.0.0/16", "188.165.0.0/16",
-    # Linode/Akamai
     "45.33.0.0/16", "45.56.0.0/16", "45.79.0.0/16", "50.116.0.0/16",
     "139.162.0.0/16", "172.104.0.0/15", "172.232.0.0/14",
-    # AWS (blocos populares)
     "3.80.0.0/12", "13.52.0.0/14", "18.188.0.0/14", "34.192.0.0/12",
     "44.192.0.0/11", "52.0.0.0/11", "54.64.0.0/11",
-    # Google Cloud
     "34.64.0.0/11", "35.184.0.0/13",
-    # Cloudflare
     "104.16.0.0/13", "172.64.0.0/13",
-    # Contabo
     "62.171.128.0/17", "161.97.0.0/16", "167.86.0.0/16", "173.212.192.0/18",
     "178.238.224.0/19", "193.26.156.0/22", "207.180.192.0/18",
-    # Scaleway
     "51.15.0.0/16", "51.158.0.0/16", "51.159.0.0/16", "163.172.0.0/16",
     "212.47.224.0/19",
 ]
@@ -98,7 +92,6 @@ for _c in HOSTING_CIDRS:
     except ValueError:
         pass
 
-# ASNs para descoberta de prefixos via RIPE Stat
 INTERESTING_ASNS = [
     13335, 16509, 15169, 8075, 14061, 20473, 24940, 16276,
     63949, 36351, 14618, 396982, 53667, 4134, 4837, 9808,
@@ -114,16 +107,76 @@ ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_KEY", "")
 MASSCAN_RATE = int(os.getenv("MASSCAN_RATE", "10000"))
 MASSCAN_ENABLED = os.getenv("MASSCAN_ENABLED", "auto")
 
+# ---------------------------------------------------------------------------
+# Bounty ASN discovery — prefixos de ASNs dos alvos de bounty
+# ---------------------------------------------------------------------------
+_bounty_prefixes: list[ipaddress.IPv4Network] = []
+_bounty_prefixes_lock = threading.Lock()
+_bounty_asn_cache: dict[int, list[ipaddress.IPv4Network]] = {}
+_bounty_asn_cache_lock = threading.Lock()
+
 _feed_stats: dict[str, Any] = {
     "queue_size": 0,
     "hosting_cidrs": len(_hosting_networks),
     "discovered_prefixes": 0,
+    "bounty_prefixes": 0,
+    "bounty_asns_discovered": 0,
     "dshield_ips": 0,
     "blocklist_ips": 0,
     "abuseipdb_ips": 0,
     "masscan_ips": 0,
     "masscan_running": False,
+    "aws_prefixes": 0,
+    "gcp_prefixes": 0,
+    "azure_prefixes": 0,
+    "ipsum_ips": 0,
+    "feodo_ips": 0,
+    "et_compromised_ips": 0,
+    "spamhaus_nets": 0,
+    "tor_exits": 0,
 }
+
+# ---------------------------------------------------------------------------
+# CDN IP ranges — used for identification, not scanning
+# ---------------------------------------------------------------------------
+_cdn_networks: list[ipaddress.IPv4Network] = []
+_cdn_lock = threading.Lock()
+
+# Cloud provider prefixes — for cross-referencing with bounty targets
+_cloud_prefixes: dict[str, list[ipaddress.IPv4Network]] = {
+    "aws": [],
+    "gcp": [],
+    "azure": [],
+}
+_cloud_lock = threading.Lock()
+
+
+def get_cloud_prefixes() -> dict[str, int]:
+    with _cloud_lock:
+        return {k: len(v) for k, v in _cloud_prefixes.items()}
+
+
+def is_cdn_ip(ip_str: str) -> bool:
+    """Check if an IP belongs to a known CDN (Cloudflare, Fastly)."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    with _cdn_lock:
+        return any(addr in net for net in _cdn_networks)
+
+
+def identify_cloud_provider(ip_str: str) -> str | None:
+    """Identify which cloud provider an IP belongs to."""
+    try:
+        addr = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return None
+    with _cloud_lock:
+        for provider, nets in _cloud_prefixes.items():
+            if any(addr in net for net in nets):
+                return provider
+    return None
 _feed_stats_lock = threading.Lock()
 
 
@@ -133,6 +186,11 @@ def get_feed_stats() -> dict[str, Any]:
     s["queue_size"] = ip_queue.qsize()
     with _prefixes_lock:
         s["discovered_prefixes"] = len(_discovered_prefixes)
+    with _bounty_prefixes_lock:
+        s["bounty_prefixes"] = len(_bounty_prefixes)
+    s["cloud"] = get_cloud_prefixes()
+    with _cdn_lock:
+        s["cdn_ranges"] = len(_cdn_networks)
     return s
 
 
@@ -160,13 +218,156 @@ def _random_public_ip() -> str:
             return ip
 
 
-def generate_smart_ip() -> str:
+# ---------------------------------------------------------------------------
+# ASN discovery utilities (exported for bounty.py)
+# ---------------------------------------------------------------------------
+def discover_asn_for_ip(ip_str: str) -> dict[str, Any] | None:
+    """Query RIPE Stat to find the ASN and holder for a given IP.
+
+    Returns {"asn": int, "holder": str, "prefix": str} or None.
     """
-    60% hosting CIDR (alta densidade)
-    25% prefixos BGP descobertos
-    15% aleatório puro (diversidade)
+    try:
+        url = f"https://stat.ripe.net/data/prefix-overview/data.json?resource={ip_str}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json().get("data", {})
+        asns = data.get("asns", [])
+        if not asns:
+            return None
+        asn_info = asns[0]
+        return {
+            "asn": asn_info.get("asn"),
+            "holder": asn_info.get("holder", ""),
+            "prefix": data.get("resource", ""),
+        }
+    except Exception:
+        return None
+
+
+def enumerate_asn_prefixes(asn: int) -> list[ipaddress.IPv4Network]:
+    """List all announced IPv4 prefixes for an ASN via RIPE Stat.
+
+    Uses an internal cache so repeated calls for the same ASN are free.
+    """
+    with _bounty_asn_cache_lock:
+        if asn in _bounty_asn_cache:
+            return list(_bounty_asn_cache[asn])
+
+    prefixes: list[ipaddress.IPv4Network] = []
+    try:
+        url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return prefixes
+        for p in resp.json().get("data", {}).get("prefixes", []):
+            try:
+                net = ipaddress.ip_network(p.get("prefix", ""), strict=False)
+                if net.version == 4 and 16 <= net.prefixlen <= 24:
+                    prefixes.append(net)
+            except ValueError:
+                pass
+    except Exception:
+        pass
+
+    with _bounty_asn_cache_lock:
+        _bounty_asn_cache[asn] = list(prefixes)
+
+    return prefixes
+
+
+def discover_org_ip_ranges(sample_ips: list[str]) -> list[ipaddress.IPv4Network]:
+    """Given sample IPs from a target org, discover all IP ranges owned by that org.
+
+    1. Finds ASNs for each sample IP
+    2. Enumerates all prefixes announced by those ASNs
+    3. Returns deduplicated list of networks
+    """
+    seen_asns: set[int] = set()
+    all_prefixes: list[ipaddress.IPv4Network] = []
+
+    for ip in sample_ips[:20]:
+        asn_info = discover_asn_for_ip(ip)
+        if not asn_info or not asn_info.get("asn"):
+            continue
+        asn = asn_info["asn"]
+        if asn in seen_asns:
+            continue
+        seen_asns.add(asn)
+        prefixes = enumerate_asn_prefixes(asn)
+        all_prefixes.extend(prefixes)
+        logger.info("[FEED] ASN discovery: IP %s → AS%d (%s) → %d prefixes",
+                    ip, asn, asn_info.get("holder", "?")[:30], len(prefixes))
+        time.sleep(0.5)
+
+    seen_nets: set[str] = set()
+    deduped: list[ipaddress.IPv4Network] = []
+    for net in all_prefixes:
+        key = str(net)
+        if key not in seen_nets:
+            seen_nets.add(key)
+            deduped.append(net)
+
+    return deduped
+
+
+def register_bounty_prefixes(prefixes: list[ipaddress.IPv4Network]) -> int:
+    """Register IP prefixes discovered from bounty targets for prioritized scanning."""
+    added = 0
+    with _bounty_prefixes_lock:
+        existing = {str(p) for p in _bounty_prefixes}
+        for p in prefixes:
+            key = str(p)
+            if key not in existing:
+                existing.add(key)
+                _bounty_prefixes.append(p)
+                added += 1
+    if added:
+        _inc_feed("bounty_prefixes", added)
+        logger.info("[FEED] %d novos prefixos bounty registrados (total=%d)",
+                    added, len(_bounty_prefixes))
+    return added
+
+
+# ---------------------------------------------------------------------------
+# Smart IP generation (bounty-aware)
+# ---------------------------------------------------------------------------
+BOUNTY_FEED_MODE = os.getenv("BOUNTY_MODE", "true").lower() in ("1", "true", "yes")
+
+
+def generate_smart_ip() -> str:
+    """Generate an IP with bounty-aware priorities.
+
+    When bounty prefixes exist:
+      70% bounty target ASN prefixes (IPs from orgs with bounty programs)
+      20% hosting CIDR
+      10% random
+
+    Without bounty prefixes (fallback to original):
+      60% hosting CIDR
+      25% BGP prefixes
+      15% random
     """
     roll = random.random()
+
+    with _bounty_prefixes_lock:
+        has_bounty = len(_bounty_prefixes) > 0
+
+    if has_bounty and BOUNTY_FEED_MODE:
+        if roll < 0.70:
+            with _bounty_prefixes_lock:
+                net = random.choice(_bounty_prefixes)
+            ip = _random_ip_from_cidr(net)
+            if is_public(ip):
+                return ip
+
+        if roll < 0.90 and _hosting_networks:
+            net = random.choice(_hosting_networks)
+            ip = _random_ip_from_cidr(net)
+            if is_public(ip):
+                return ip
+
+        return _random_public_ip()
 
     if roll < 0.60 and _hosting_networks:
         net = random.choice(_hosting_networks)
@@ -350,34 +551,417 @@ def _feed_masscan() -> None:
             time.sleep(30)
 
 
+# ---------------------------------------------------------------------------
+# Feed: AWS IP Ranges (oficial, sem chave)
+# ---------------------------------------------------------------------------
+def _feed_aws_ranges() -> None:
+    try:
+        resp = requests.get(
+            "https://ip-ranges.amazonaws.com/ip-ranges.json",
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        count = 0
+        with _cloud_lock:
+            _cloud_prefixes["aws"].clear()
+            for entry in data.get("prefixes", []):
+                prefix = entry.get("ip_prefix", "")
+                try:
+                    net = ipaddress.ip_network(prefix, strict=False)
+                    if net.version == 4 and net.prefixlen >= 16:
+                        _cloud_prefixes["aws"].append(net)
+                        count += 1
+                except ValueError:
+                    pass
+        _inc_feed("aws_prefixes", count)
+        logger.info("[FEED] AWS: %d prefixos IPv4", count)
+    except Exception as e:
+        logger.warning("[FEED] AWS ranges erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: GCP IP Ranges (oficial, sem chave)
+# ---------------------------------------------------------------------------
+def _feed_gcp_ranges() -> None:
+    try:
+        resp = requests.get(
+            "https://www.gstatic.com/ipranges/cloud.json",
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        count = 0
+        with _cloud_lock:
+            _cloud_prefixes["gcp"].clear()
+            for entry in data.get("prefixes", []):
+                prefix = entry.get("ipv4Prefix", "")
+                if not prefix:
+                    continue
+                try:
+                    net = ipaddress.ip_network(prefix, strict=False)
+                    if net.version == 4:
+                        _cloud_prefixes["gcp"].append(net)
+                        count += 1
+                except ValueError:
+                    pass
+        _inc_feed("gcp_prefixes", count)
+        logger.info("[FEED] GCP: %d prefixos IPv4", count)
+    except Exception as e:
+        logger.warning("[FEED] GCP ranges erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Azure IP Ranges (oficial, sem chave)
+# ---------------------------------------------------------------------------
+def _feed_azure_ranges() -> None:
+    try:
+        page = requests.get(
+            "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519",
+            timeout=15,
+            headers={"User-Agent": "scanner-feeds/1.0"},
+        )
+        import re
+        match = re.search(
+            r'https://download\.microsoft\.com/download/[^"]+\.json',
+            page.text,
+        )
+        if not match:
+            logger.warning("[FEED] Azure: URL do JSON nao encontrada")
+            return
+        json_url = match.group(0)
+        resp = requests.get(json_url, timeout=60)
+        if resp.status_code != 200:
+            return
+        data = resp.json()
+        count = 0
+        with _cloud_lock:
+            _cloud_prefixes["azure"].clear()
+            for value in data.get("values", []):
+                props = value.get("properties", {})
+                for prefix in props.get("addressPrefixes", []):
+                    if ":" in prefix:
+                        continue
+                    try:
+                        net = ipaddress.ip_network(prefix, strict=False)
+                        if net.version == 4 and net.prefixlen >= 16:
+                            _cloud_prefixes["azure"].append(net)
+                            count += 1
+                    except ValueError:
+                        pass
+        _inc_feed("azure_prefixes", count)
+        logger.info("[FEED] Azure: %d prefixos IPv4", count)
+    except Exception as e:
+        logger.warning("[FEED] Azure ranges erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Cloudflare + Fastly IP ranges (CDN identification)
+# ---------------------------------------------------------------------------
+def _feed_cdn_ranges() -> None:
+    total = 0
+    with _cdn_lock:
+        _cdn_networks.clear()
+
+    for url in [
+        "https://www.cloudflare.com/ips-v4",
+        "https://api.fastly.com/public-ip-list",
+    ]:
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                continue
+
+            if "fastly" in url:
+                data = resp.json()
+                lines = data.get("addresses", [])
+            else:
+                lines = resp.text.strip().splitlines()
+
+            for line in lines:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                try:
+                    net = ipaddress.ip_network(line, strict=False)
+                    if net.version == 4:
+                        with _cdn_lock:
+                            _cdn_networks.append(net)
+                        total += 1
+                except ValueError:
+                    pass
+        except Exception as e:
+            logger.warning("[FEED] CDN ranges erro (%s): %s", url, e)
+
+    logger.info("[FEED] CDN: %d prefixos (Cloudflare + Fastly)", total)
+
+
+# ---------------------------------------------------------------------------
+# Feed: IPsum — threat intel agregado de 30+ fontes (sem chave)
+# ---------------------------------------------------------------------------
+def _feed_ipsum() -> None:
+    try:
+        resp = requests.get(
+            "https://raw.githubusercontent.com/stamparm/ipsum/master/levels/3.txt",
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            return
+        count = 0
+        for line in resp.text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            ip = line.split("\t")[0].strip()
+            if ip and is_public(ip):
+                try:
+                    ip_queue.put_nowait(ip)
+                    count += 1
+                except queue.Full:
+                    break
+        _inc_feed("ipsum_ips", count)
+        logger.info("[FEED] IPsum: %d IPs maliciosos (level 3+)", count)
+    except Exception as e:
+        logger.warning("[FEED] IPsum erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Feodo Tracker — C2 botnets (Emotet, Dridex, etc.) (sem chave)
+# ---------------------------------------------------------------------------
+def _feed_feodo() -> None:
+    try:
+        resp = requests.get(
+            "https://feodotracker.abuse.ch/downloads/ipblocklist.txt",
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return
+        count = 0
+        for line in resp.text.splitlines():
+            ip = line.strip()
+            if not ip or ip.startswith("#"):
+                continue
+            if is_public(ip):
+                try:
+                    ip_queue.put_nowait(ip)
+                    count += 1
+                except queue.Full:
+                    break
+        _inc_feed("feodo_ips", count)
+        logger.info("[FEED] Feodo Tracker: %d C2 IPs", count)
+    except Exception as e:
+        logger.warning("[FEED] Feodo erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Emerging Threats — IPs comprometidos (sem chave)
+# ---------------------------------------------------------------------------
+def _feed_emerging_threats() -> None:
+    try:
+        resp = requests.get(
+            "https://rules.emergingthreats.net/blockrules/compromised-ips.txt",
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return
+        count = 0
+        for line in resp.text.splitlines():
+            ip = line.strip()
+            if not ip or ip.startswith("#"):
+                continue
+            if is_public(ip):
+                try:
+                    ip_queue.put_nowait(ip)
+                    count += 1
+                except queue.Full:
+                    break
+        _inc_feed("et_compromised_ips", count)
+        logger.info("[FEED] Emerging Threats: %d IPs comprometidos", count)
+    except Exception as e:
+        logger.warning("[FEED] Emerging Threats erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Spamhaus DROP + EDROP — CIDRs hijacked (sem chave)
+# ---------------------------------------------------------------------------
+def _feed_spamhaus() -> None:
+    total = 0
+    for url in [
+        "https://www.spamhaus.org/drop/drop.txt",
+        "https://www.spamhaus.org/drop/edrop.txt",
+    ]:
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                continue
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line or line.startswith(";"):
+                    continue
+                cidr = line.split(";")[0].strip()
+                if not cidr:
+                    continue
+                try:
+                    net = ipaddress.ip_network(cidr, strict=False)
+                    if net.version == 4:
+                        ip = _random_ip_from_cidr(net)
+                        if is_public(ip):
+                            try:
+                                ip_queue.put_nowait(ip)
+                                total += 1
+                            except queue.Full:
+                                break
+                except ValueError:
+                    pass
+        except Exception as e:
+            logger.warning("[FEED] Spamhaus erro (%s): %s", url, e)
+
+    _inc_feed("spamhaus_nets", total)
+    if total:
+        logger.info("[FEED] Spamhaus DROP/EDROP: %d IPs de redes hijacked", total)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Tor Exit Nodes (sem chave)
+# ---------------------------------------------------------------------------
+def _feed_tor_exits() -> None:
+    try:
+        resp = requests.get(
+            "https://check.torproject.org/torbulkexitlist",
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            return
+        count = 0
+        for line in resp.text.splitlines():
+            ip = line.strip()
+            if not ip or ip.startswith("#"):
+                continue
+            if is_public(ip):
+                try:
+                    ip_queue.put_nowait(ip)
+                    count += 1
+                except queue.Full:
+                    break
+        _inc_feed("tor_exits", count)
+        logger.info("[FEED] Tor: %d exit nodes", count)
+    except Exception as e:
+        logger.warning("[FEED] Tor exits erro: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Feed: Bounty target ASNs — descobre ASNs dos alvos e alimenta a fila
+# ---------------------------------------------------------------------------
+def _feed_bounty_targets() -> None:
+    """Periodically read bounty targets from MongoDB and discover their ASNs.
+
+    Feeds IPs from those ASNs into the queue for prioritized scanning.
+    """
+    if not BOUNTY_FEED_MODE:
+        return
+
+    time.sleep(30)
+    logger.info("[FEED] Bounty target ASN feed iniciado")
+
+    while True:
+        try:
+            from app.database import get_bounty_targets
+            tcol = get_bounty_targets()
+            target_ips: set[str] = set()
+            for t in tcol.find({"alive": True}, {"ips": 1}).limit(200):
+                for ip in t.get("ips", []):
+                    if is_public(ip):
+                        target_ips.add(ip)
+
+            if not target_ips:
+                time.sleep(300)
+                continue
+
+            sample = random.sample(sorted(target_ips), min(10, len(target_ips)))
+            prefixes = discover_org_ip_ranges(sample)
+            if prefixes:
+                register_bounty_prefixes(prefixes)
+                count = 0
+                for net in prefixes[:50]:
+                    for _ in range(5):
+                        ip = _random_ip_from_cidr(net)
+                        if is_public(ip):
+                            try:
+                                ip_queue.put_nowait(ip)
+                                count += 1
+                            except queue.Full:
+                                break
+                _inc_feed("bounty_asns_discovered", len(prefixes))
+                logger.info("[FEED] Bounty ASN feed: %d IPs enfileirados de %d prefixos",
+                            count, len(prefixes))
+        except Exception as e:
+            logger.error("[FEED] Bounty ASN feed erro: %s", e)
+
+        time.sleep(1800)
+
+
 def _periodic_feeds() -> None:
+    """Refresh all lightweight feeds every 30 minutes."""
     while True:
         time.sleep(1800)
-        logger.info("[FEED] Refresh periodico...")
-        try:
-            _feed_dshield()
-        except Exception:
-            pass
-        try:
-            _feed_blocklist()
-        except Exception:
-            pass
-        try:
-            _feed_abuseipdb()
-        except Exception:
-            pass
+        logger.info("[FEED] Refresh periodico de %d fontes...", 9)
+        for fn in [
+            _feed_dshield,
+            _feed_blocklist,
+            _feed_abuseipdb,
+            _feed_ipsum,
+            _feed_feodo,
+            _feed_emerging_threats,
+            _feed_spamhaus,
+            _feed_tor_exits,
+            _feed_cdn_ranges,
+        ]:
+            try:
+                fn()
+            except Exception:
+                pass
 
 
 def start_feeds() -> None:
-    feeds = [
+    # One-time feeds (run once at startup)
+    startup_feeds = [
         ("ripe-stat", _feed_ripe_stat),
+        ("aws-ranges", _feed_aws_ranges),
+        ("gcp-ranges", _feed_gcp_ranges),
+        ("azure-ranges", _feed_azure_ranges),
+        ("cdn-ranges", _feed_cdn_ranges),
+    ]
+
+    # IP queue feeds (run once at startup, then periodically)
+    queue_feeds = [
         ("dshield", _feed_dshield),
         ("blocklist", _feed_blocklist),
         ("abuseipdb", _feed_abuseipdb),
+        ("ipsum", _feed_ipsum),
+        ("feodo", _feed_feodo),
+        ("emerging-threats", _feed_emerging_threats),
+        ("spamhaus", _feed_spamhaus),
+        ("tor-exits", _feed_tor_exits),
+    ]
+
+    # Long-running feeds (run continuously)
+    continuous_feeds = [
         ("masscan", _feed_masscan),
+        ("bounty-targets", _feed_bounty_targets),
         ("periodic-refresh", _periodic_feeds),
     ]
-    for name, func in feeds:
+
+    all_feeds = startup_feeds + queue_feeds + continuous_feeds
+    for name, func in all_feeds:
         t = threading.Thread(target=func, name=f"feed-{name}", daemon=True)
         t.start()
-    logger.info("[FEED] %d fontes ativas | %d CIDRs hosting | fila max %d", len(feeds), len(_hosting_networks), ip_queue.maxsize)
+
+    logger.info(
+        "[FEED] %d fontes ativas | %d CIDRs hosting | bounty_mode=%s | fila max %d\n"
+        "       Cloud: AWS+GCP+Azure | CDN: Cloudflare+Fastly\n"
+        "       Threat: IPsum+Feodo+ET+Spamhaus+DShield+Blocklist+Tor",
+        len(all_feeds), len(_hosting_networks),
+        BOUNTY_FEED_MODE, ip_queue.maxsize,
+    )

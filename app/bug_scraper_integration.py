@@ -54,7 +54,10 @@ def _normalize_scope_items(items: list[str]) -> list[str]:
             except Exception:
                 pass
         s = s.split("/", 1)[0].strip()
+
+        wildcard_prefix = ""
         if s.startswith("*."):
+            wildcard_prefix = "*."
             s = s[2:]
 
         if not s:
@@ -69,7 +72,7 @@ def _normalize_scope_items(items: list[str]) -> list[str]:
 
             if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", s):
                 continue
-            normalized = s
+            normalized = wildcard_prefix + s
 
         if normalized not in seen:
             seen.add(normalized)

@@ -1,0 +1,70 @@
+services:
+  worker:
+    build: .
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      MONGODB_URI: ${MONGODB_URI:-mongodb://user:password@scanner_db:27017/scanner_db?authSource=admin&connectTimeoutMS=30000&serverSelectionTimeoutMS=30000}
+
+      AUTH_USERNAME: "admin"
+      AUTH_PASSWORD: "scanner2026"
+      LOG_LEVEL: "INFO"
+      PYTHONUNBUFFERED: "1"
+
+      # Desabilitar scanner de rede (worker foca em bounty)
+      NETWORK_SCANNER_ENABLED: "false"
+      NUM_WORKERS: "0"
+
+      # Bounty recon — core do worker
+      BOUNTY_MODE: "true"
+      BOUNTY_RECON_INTERVAL: "10800"
+      BOUNTY_RECON_WORKERS: "3"
+      SUBFINDER_TIMEOUT: "300"
+      HTTPX_TIMEOUT: "300"
+
+      # Vuln scanner — auto-scan em targets de bounty
+      VULN_WORKERS: "2"
+      VULN_AUTO_SCAN: "true"
+      VULN_AUTO_MIN_SCORE: "50"
+      NUCLEI_SEVERITY: "critical,high,medium"
+      NUCLEI_TIMEOUT: "120"
+      NMAP_TIMEOUT: "180"
+
+      # Rate limits conservadores (compartilha APIs com main)
+      SHODAN_RPS: "5"
+      IPAPI_RPS: "0.5"
+      IPINFO_RPS: "0.5"
+      PRESCAN_TIMEOUT: "0.8"
+
+      MASSCAN_ENABLED: "false"
+      ABUSEIPDB_KEY: ""
+      IPINFO_TOKEN: ""
+
+      # HackerOne
+      HACKERONE_API_USERNAME: "${HACKERONE_API_USERNAME:-}"
+
+      # Integrations
+      BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
+      BUG_SCRAPER_ARGS: "--mode discovery --output json --bounty-only"
+      HTTP_PORT_SCANNER_ENABLED: "true"
+      HTTP_PORT_SCANNER_PATH: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
+
+    networks:
+      - scanner_net
+    restart: unless-stopped
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "info"]
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  scanner_net:
+    external: true
+    name: scanner-internet_default

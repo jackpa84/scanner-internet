@@ -29,13 +29,15 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "5000:5000"
+      - "5001:5000"
     cap_add:
       - NET_RAW
       - NET_ADMIN
     env_file:
       - .env
     environment:
+      AUTH_USERNAME: "admin"
+      AUTH_PASSWORD: "scanner2026"
       MONGODB_URI: mongodb://user:password@db:27017/scanner_db?authSource=admin
       LOG_LEVEL: "INFO"
       NETWORK_SCANNER_ENABLED: "false"
@@ -70,9 +72,6 @@ services:
       HTTP_PORT_SCANNER_PATH: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
     volumes:
       - ./app:/app/app
-      # Ferramentas externas instaladas no host (modo leitura)
-      - /opt/Bug_Scraper:/opt/Bug_Scraper:ro
-      - /opt/HTTP-Port-Scanner-HackerOne-Edition:/opt/HTTP-Port-Scanner-HackerOne-Edition:ro
     restart: unless-stopped
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "debug"]
     logging:
@@ -89,7 +88,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_API_URL: http://localhost:5001
       CHOKIDAR_USEPOLLING: "true"
       WATCHPACK_POLLING: "true"
     volumes:

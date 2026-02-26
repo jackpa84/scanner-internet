@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
-import DesktopLayout from "@/components/DesktopLayout";
+import AuthGate from "@/components/AuthGate";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -18,7 +18,7 @@ export default function RootLayout({
   return (
     <html lang="pt-BR" className="dark">
       <body className={`${inter.className} antialiased`}>
-        <DesktopLayout>{children}</DesktopLayout>
+        <AuthGate>{children}</AuthGate>
       </body>
     </html>
   );

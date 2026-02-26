@@ -1,142 +1,83 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
 
-export interface GeoInfo {
-  city?: string;
-  region?: string;
-  country?: string;
-  lat?: string;
-  lon?: string;
-  org?: string;
-  timezone?: string;
-  isp?: string;
-  as?: string;
-  mobile?: boolean;
-  proxy?: boolean;
-  hosting?: boolean;
+const TOKEN_KEY = "scanner_auth_token";
+
+export function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem(TOKEN_KEY);
 }
 
-export interface ThreatEntry {
-  malware: string;
-  malware_printable: string;
-  threat_type: string;
-  confidence: number;
-  first_seen: string;
-  tags: string[];
+export function setToken(token: string): void {
+  localStorage.setItem(TOKEN_KEY, token);
 }
 
-export interface ThreatIntel {
-  known_threat: boolean;
-  threats: ThreatEntry[];
+export function clearToken(): void {
+  localStorage.removeItem(TOKEN_KEY);
 }
 
-export interface NetworkInfo {
-  isp?: string;
-  org?: string;
-  as?: string;
-  mobile?: boolean;
-  proxy?: boolean;
-  hosting?: boolean;
+export function isAuthenticated(): boolean {
+  return !!getToken();
 }
 
-export interface RiskProfile {
-  score: number;
-  level: "low" | "medium" | "high";
-  reasons: string[];
+export async function login(username: string, password: string): Promise<{ token: string; username: string }> {
+  const res = await fetch(`${API_BASE}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password }),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Login falhou");
+  }
+  const data = await res.json();
+  setToken(data.token);
+  return data;
 }
 
-export interface ScanResult {
-  id: string;
-  ip: string;
-  ports: number[];
-  vulns: string[];
-  hostnames: string[];
-  rdns?: string;
-  timestamp: string;
-  router_count: number;
-  router_info?: RouterInfo[];
-  geo?: GeoInfo;
-  network?: NetworkInfo;
-  threat_intel?: ThreatIntel;
-  risk?: RiskProfile;
+export function logout(): void {
+  clearToken();
+  window.location.href = "/";
 }
 
-export interface RouterInfo {
-  port: number;
-  service: string;
-  banner?: string;
-  title?: string;
-  server?: string;
-}
-
-export interface CountryStat {
-  country: string;
-  count: number;
-}
-
-export interface Stats {
-  total: number;
-  with_ports: number;
-  with_vulns: number;
-  with_router_info: number;
-  with_high_risk: number;
-  with_geo: number;
-  top_countries: CountryStat[];
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}${path}`, {
+    cache: "no-store",
+    headers: { ...authHeaders() },
+  });
+  if (res.status === 401) {
+    clearToken();
+    if (typeof window !== "undefined") window.location.href = "/";
+    throw new Error("Sessao expirada");
+  }
   if (!res.ok) throw new Error(`API ${path}: ${res.status}`);
   return res.json();
 }
 
-export interface ApiBreakerStatus {
-  name: string;
-  blocked: boolean;
-  cooldown: number;
-  remaining_seconds: number;
-  blocked_since: string;
-}
+const API_POST = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (res.status === 401) {
+    clearToken();
+    if (typeof window !== "undefined") window.location.href = "/";
+    throw new Error("Sessao expirada");
+  }
+  if (!res.ok) throw new Error(`API POST ${path}: ${res.status}`);
+  return res.json();
+};
 
-export interface ScanStats {
-  tested: number;
-  alive: number;
-  saved: number;
-  dead: number;
-}
-
-export interface FeedStats {
-  queue_size: number;
-  hosting_cidrs: number;
-  discovered_prefixes: number;
-  dshield_ips: number;
-  blocklist_ips: number;
-  abuseipdb_ips: number;
-  masscan_ips: number;
-  masscan_running: boolean;
-}
-
-export interface VulnScannerStats {
-  queued: number;
-  scanning: number;
-  completed: number;
-  vulns_found: number;
-  nuclei_runs: number;
-  nmap_runs: number;
-  errors: number;
-  queue_size: number;
-}
-
-export interface HealthInfo {
-  workers: number;
-  scan_interval: number;
-  shodan_rps: number;
-  apis: ApiBreakerStatus[];
-  blocked_count: number;
-  scan_stats: ScanStats;
-  feeds: FeedStats;
-  vuln_scanner?: VulnScannerStats;
-}
-
+// ---------------------------------------------------------------------------
+// Vuln Scanner (used by VulnPanel)
+// ---------------------------------------------------------------------------
 export interface VulnResult {
   id: string;
   ip: string;
@@ -161,6 +102,17 @@ export interface TopVuln {
   count: number;
 }
 
+export interface VulnScannerStats {
+  queued: number;
+  scanning: number;
+  completed: number;
+  vulns_found: number;
+  nuclei_runs: number;
+  nmap_runs: number;
+  errors: number;
+  queue_size: number;
+}
+
 export interface VulnStats {
   total_vulns: number;
   unique_ips_scanned: number;
@@ -176,12 +128,6 @@ export interface VulnStats {
   scanner: VulnScannerStats;
 }
 
-export const fetchHealth = () => apiFetch<HealthInfo>("/api/health");
-export const fetchStats = () => apiFetch<Stats>("/api/stats");
-export const fetchResults = () => apiFetch<ScanResult[]>("/api/results");
-export const fetchRouterInfo = (id: string) => apiFetch<RouterInfo[]>(`/api/router_info/${id}`);
-export const fetchPrioritizedFindings = (limit = 20, minScore = 40) =>
-  apiFetch<ScanResult[]>(`/api/prioritized_findings?limit=${limit}&min_score=${minScore}`);
 export const fetchVulnResults = (limit = 50, severity?: string) => {
   let path = `/api/vulns/results?limit=${limit}`;
   if (severity) path += `&severity=${severity}`;
@@ -189,18 +135,6 @@ export const fetchVulnResults = (limit = 50, severity?: string) => {
 };
 export const fetchVulnStats = () => apiFetch<VulnStats>("/api/vulns/stats");
 export const fetchVulnsByIp = (ip: string) => apiFetch<VulnResult[]>(`/api/vulns/ip/${ip}`);
-
-const API_POST = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`API POST ${path}: ${res.status}`);
-  return res.json();
-};
-
 export const triggerVulnScan = (ip: string) =>
   API_POST<{ queued: boolean; ip: string }>("/api/vulns/scan", { ip });
 export const triggerBatchVulnScan = (minScore = 70) =>
@@ -220,7 +154,7 @@ export interface BountyProgram {
   created_at?: string;
   last_recon?: string;
   last_recon_error?: string;
-   first_recon_at?: string;
+  first_recon_at?: string;
   policy_url?: string;
   has_bounty?: boolean;
   bounty_min?: number;
@@ -230,7 +164,14 @@ export interface BountyProgram {
   notes?: string;
   priority?: string;
   safe_harbor?: boolean;
-  stats?: { subdomains?: number; resolved?: number; alive?: number };
+  stats?: {
+    subdomains?: number;
+    resolved?: number;
+    alive?: number;
+    asns_discovered?: number;
+    org_prefixes?: number;
+    new_subdomains?: number;
+  };
   target_count?: number;
   alive_count?: number;
   vuln_count?: number;
@@ -275,6 +216,7 @@ export interface BountyTarget {
       evidence?: string;
     }>;
   };
+  is_new?: boolean;
   last_recon?: string;
 }
 
@@ -283,13 +225,32 @@ export interface BountyReconStats {
   subdomains_found: number;
   hosts_alive: number;
   errors: number;
+  crtsh_subdomains: number;
+  asns_discovered: number;
+  rdns_subdomains: number;
+  new_subdomains_detected: number;
 }
 
 export interface BountyStats {
   programs: number;
+  programs_with_bounty: number;
   targets: number;
   alive_targets: number;
+  new_targets: number;
+  total_changes: number;
+  bounty_prefixes: number;
   recon: BountyReconStats;
+}
+
+export interface BountyChange {
+  id: string;
+  program_id: string;
+  program_name: string;
+  timestamp: string;
+  new_subdomains: string[];
+  removed_subdomains: string[];
+  total_current: number;
+  total_previous: number;
 }
 
 export interface BountyScopeSuggestion {
@@ -359,6 +320,7 @@ export const triggerBountyTargetScan = (targetId: string) =>
 
 export const deleteBountyProgram = async (programId: string): Promise<{ deleted: boolean }> => {
   const res = await fetch(`${API_BASE}/api/bounty/programs/${programId}`, {
+    headers: { ...authHeaders() },
     method: "DELETE",
     cache: "no-store",
   });
@@ -368,6 +330,7 @@ export const deleteBountyProgram = async (programId: string): Promise<{ deleted:
 
 export const deleteAllBountyPrograms = async (): Promise<{ deleted_programs: number; deleted_targets: number }> => {
   const res = await fetch(`${API_BASE}/api/bounty/programs`, {
+    headers: { ...authHeaders() },
     method: "DELETE",
     cache: "no-store",
   });
@@ -376,7 +339,19 @@ export const deleteAllBountyPrograms = async (): Promise<{ deleted_programs: num
 };
 
 export const fetchBountyReport = async (programId: string): Promise<string> => {
-  const res = await fetch(`${API_BASE}/api/bounty/report/${programId}`, { cache: "no-store" });
+  const res = await fetch(`${API_BASE}/api/bounty/report/${programId}`, {
+    cache: "no-store",
+    headers: { ...authHeaders() },
+  });
   if (!res.ok) throw new Error(`Report: ${res.status}`);
   return res.text();
 };
+
+export const fetchBountyChanges = (programId: string, limit = 20) =>
+  apiFetch<BountyChange[]>(`/api/bounty/programs/${programId}/changes?limit=${limit}`);
+
+export const fetchRecentChanges = (limit = 50) =>
+  apiFetch<BountyChange[]>(`/api/bounty/changes/recent?limit=${limit}`);
+
+export const fetchNewTargets = (limit = 100) =>
+  apiFetch<BountyTarget[]>(`/api/bounty/targets/new?limit=${limit}`);

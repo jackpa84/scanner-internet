@@ -6,6 +6,7 @@ import {
   fetchBountyTargets,
   fetchBountyStats,
   fetchProgramFlow,
+  fetchBountyChanges,
   createBountyProgram,
   suggestBountyScope,
   triggerBountyRecon,
@@ -20,6 +21,7 @@ import {
   type BountyTarget,
   type BountyStats,
   type BountyProgramFlow,
+  type BountyChange,
 } from "@/lib/api";
 
 const REFRESH_MS = 10_000;
@@ -43,9 +45,9 @@ const STATUS_COLORS: Record<string, string> = {
 
 function StatBox({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="rounded-lg bg-slate-800/60 border border-slate-700/50 px-4 py-3 text-center">
-      <div className="text-2xl font-bold text-white tabular-nums">{value}</div>
-      <div className="text-[11px] text-slate-400 uppercase tracking-wider mt-0.5">{label}</div>
+    <div className="rounded-xl bg-slate-800/60 border border-slate-700/50 px-3 py-2.5 sm:px-4 sm:py-3 text-center">
+      <div className="text-xl sm:text-2xl font-bold text-white tabular-nums">{value}</div>
+      <div className="text-[10px] sm:text-[11px] text-slate-400 uppercase tracking-wider mt-0.5">{label}</div>
     </div>
   );
 }
@@ -211,6 +213,10 @@ export default function BountyPanel() {
   const [bugScraperLoading, setBugScraperLoading] = useState(false);
   const [bugScraperInserted, setBugScraperInserted] = useState<number | null>(null);
   const [clearingAll, setClearingAll] = useState(false);
+  const [reconAllRunning, setReconAllRunning] = useState(false);
+  const [reconAllProgress, setReconAllProgress] = useState<{ done: number; total: number } | null>(null);
+  const [changes, setChanges] = useState<BountyChange[]>([]);
+  const [changesLoading, setChangesLoading] = useState(false);
 
   const handleBugScraperSync = async () => {
     try {
@@ -240,6 +246,25 @@ export default function BountyPanel() {
     } finally {
       setClearingAll(false);
     }
+  };
+
+  const handleReconAll = async () => {
+    if (programs.length === 0) return;
+    const eligible = programs.filter((p) => p.status !== "reconning");
+    if (eligible.length === 0) return;
+    setReconAllRunning(true);
+    setReconAllProgress({ done: 0, total: eligible.length });
+    for (let i = 0; i < eligible.length; i++) {
+      try {
+        await triggerBountyRecon(eligible[i].id);
+      } catch (e) {
+        console.error(`Recon error for ${eligible[i].name}:`, e);
+      }
+      setReconAllProgress({ done: i + 1, total: eligible.length });
+    }
+    setReconAllRunning(false);
+    setReconAllProgress(null);
+    await loadPrograms();
   };
 
   const loadPrograms = useCallback(async () => {
@@ -296,18 +321,23 @@ export default function BountyPanel() {
 
   const loadTargets = useCallback(async (programId: string) => {
     setLoadingTargets(true);
+    setChangesLoading(true);
     try {
-      const [t, flow] = await Promise.all([
+      const [t, flow, ch] = await Promise.all([
         fetchBountyTargets(programId),
         fetchProgramFlow(programId).catch(() => null),
+        fetchBountyChanges(programId, 10).catch(() => []),
       ]);
       setTargets(Array.isArray(t) ? t : []);
+      setChanges(Array.isArray(ch) ? ch : []);
       if (flow) setFlowByProgram((prev) => ({ ...prev, [programId]: flow }));
     } catch (e) {
       console.error("Failed to load targets:", e);
       setTargets([]);
+      setChanges([]);
     } finally {
       setLoadingTargets(false);
+      setChangesLoading(false);
     }
   }, []);
 
@@ -657,71 +687,128 @@ export default function BountyPanel() {
     <div className="space-y-4">
       {/* Stats */}
       {stats && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <StatBox label="Programas" value={stats.programs} />
-          <StatBox label="Targets" value={stats.targets} />
-          <StatBox label="Vivos" value={stats.alive_targets} />
-          <StatBox label="Recons OK" value={stats.recon?.recons_completed ?? 0} />
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <StatBox label="Programas" value={stats.programs} />
+            <StatBox label="Targets" value={stats.targets} />
+            <StatBox label="Vivos" value={stats.alive_targets} />
+            <StatBox label="Recons OK" value={stats.recon?.recons_completed ?? 0} />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {(stats.new_targets ?? 0) > 0 && (
+              <div className="rounded border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-[11px]">
+                <span className="text-emerald-400 font-semibold">{stats.new_targets}</span>
+                <span className="text-slate-400 ml-1">Novos</span>
+              </div>
+            )}
+            {(stats.recon?.crtsh_subdomains ?? 0) > 0 && (
+              <div className="rounded border border-cyan-500/30 bg-cyan-500/5 px-2 py-1 text-[11px]">
+                <span className="text-cyan-400 font-semibold">{stats.recon.crtsh_subdomains}</span>
+                <span className="text-slate-400 ml-1">crt.sh</span>
+              </div>
+            )}
+            {(stats.recon?.asns_discovered ?? 0) > 0 && (
+              <div className="rounded border border-violet-500/30 bg-violet-500/5 px-2 py-1 text-[11px]">
+                <span className="text-violet-400 font-semibold">{stats.recon.asns_discovered}</span>
+                <span className="text-slate-400 ml-1">ASNs</span>
+              </div>
+            )}
+            {(stats.bounty_prefixes ?? 0) > 0 && (
+              <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px]">
+                <span className="text-amber-400 font-semibold">{stats.bounty_prefixes}</span>
+                <span className="text-slate-400 ml-1">Prefixos</span>
+              </div>
+            )}
+            {(stats.recon?.rdns_subdomains ?? 0) > 0 && (
+              <div className="rounded border border-pink-500/30 bg-pink-500/5 px-2 py-1 text-[11px]">
+                <span className="text-pink-400 font-semibold">{stats.recon.rdns_subdomains}</span>
+                <span className="text-slate-400 ml-1">rDNS</span>
+              </div>
+            )}
+            {(stats.recon?.new_subdomains_detected ?? 0) > 0 && (
+              <div className="rounded border border-lime-500/30 bg-lime-500/5 px-2 py-1 text-[11px]">
+                <span className="text-lime-400 font-semibold">{stats.recon.new_subdomains_detected}</span>
+                <span className="text-slate-400 ml-1">Novos subs</span>
+              </div>
+            )}
+            {(stats.total_changes ?? 0) > 0 && (
+              <div className="rounded border border-slate-600/50 bg-slate-800/40 px-2 py-1 text-[11px]">
+                <span className="text-slate-300 font-semibold">{stats.total_changes}</span>
+                <span className="text-slate-400 ml-1">Changes</span>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Actions + Filtro por etapa */}
-      <div className="rounded-xl border border-slate-800/80 bg-slate-900/40 px-4 py-3 flex flex-wrap items-center gap-3">
-        <div className="flex flex-wrap items-center gap-3">
+      {/* Actions */}
+      <div className="rounded-xl border border-slate-800/80 bg-slate-900/40 px-3 py-2.5 sm:px-4 sm:py-3 space-y-2 sm:space-y-0">
+        {/* Row 1: Primary actions */}
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={() => { setShowForm(!showForm); setShowCsvImport(false); }}
-            className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-4 py-2 text-sm font-semibold text-white shadow-sm transition"
+            className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-semibold text-white shadow-sm transition"
           >
-            {showForm ? "Cancelar" : "+ Novo Programa"}
+            {showForm ? "Cancelar" : "+ Novo"}
           </button>
           <button
             onClick={() => { setShowCsvImport(!showCsvImport); setShowForm(false); }}
-            className="rounded-lg bg-slate-600 hover:bg-slate-500 px-4 py-2 text-sm font-semibold text-white transition"
+            className="rounded-lg bg-slate-600 hover:bg-slate-500 px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-semibold text-white transition"
           >
-            {showCsvImport ? "Fechar" : "Importar CSV"}
+            {showCsvImport ? "Fechar" : "CSV"}
           </button>
           {programs.length > 0 && (
-            <button
-              type="button"
-              onClick={handleDeleteAllPrograms}
-              disabled={clearingAll}
-              className="rounded-lg bg-red-700/80 hover:bg-red-600 px-4 py-2 text-xs font-semibold text-red-50 disabled:opacity-50 transition"
-            >
-              {clearingAll ? "Removendo tudo..." : "Remover todos os programas"}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={handleReconAll}
+                disabled={reconAllRunning || programs.length === 0}
+                className="rounded-lg bg-blue-600 hover:bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 transition"
+              >
+                {reconAllRunning
+                  ? `${reconAllProgress?.done ?? 0}/${reconAllProgress?.total ?? 0}`
+                  : "Recon All"}
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteAllPrograms}
+                disabled={clearingAll}
+                className="rounded-lg bg-red-700/80 hover:bg-red-600 px-3 py-1.5 text-xs font-semibold text-red-50 disabled:opacity-50 transition"
+              >
+                {clearingAll ? "..." : "Limpar"}
+              </button>
+            </>
           )}
-        </div>
-        <div className="flex flex-wrap items-center gap-3 ml-auto">
-          <div className="flex items-center gap-2 text-sm text-slate-300">
-            <button
-              type="button"
-              onClick={handleBugScraperSync}
-              disabled={bugScraperLoading}
-              className="rounded-lg border border-slate-600/70 bg-slate-900/60 px-3 py-2 text-xs font-semibold text-slate-100 hover:border-emerald-500/60 hover:bg-slate-900 disabled:opacity-50 transition"
+          <div className="ml-auto flex items-center gap-2">
+            <select
+              value={filterFlowStep}
+              onChange={(e) => setFilterFlowStep(e.target.value === "" ? "" : Number(e.target.value))}
+              className="rounded-lg bg-slate-950/70 border border-slate-700 px-2.5 py-1.5 text-xs sm:text-sm text-white focus:border-emerald-500 focus:outline-none"
             >
-              {bugScraperLoading ? "Sincronizando Bug Scraper..." : "Descobrir programas (Bug Scraper)"}
-            </button>
-            {bugScraperInserted !== null && (
-              <span className="text-[11px] text-slate-400">
-                {bugScraperInserted > 0
-                  ? `${bugScraperInserted} novo(s) programa(s) adicionados`
-                  : "Nenhum programa novo encontrado"}
-              </span>
-            )}
+              <option value="">Todas</option>
+              {[1, 2, 3, 4, 5, 6, 7].map((n) => (
+                <option key={n} value={n}>Etapa {n}</option>
+              ))}
+            </select>
           </div>
-          <div className="flex items-center gap-2 text-sm text-slate-300">
-          <span className="text-slate-500 hidden sm:inline">Filtrar por etapa</span>
-          <select
-            value={filterFlowStep}
-            onChange={(e) => setFilterFlowStep(e.target.value === "" ? "" : Number(e.target.value))}
-            className="rounded-lg bg-slate-950/70 border border-slate-700 px-3 py-2 text-sm text-white focus:border-emerald-500 focus:outline-none"
+        </div>
+        {/* Row 2: Bug Scraper */}
+        <div className="flex items-center gap-2 text-xs">
+          <button
+            type="button"
+            onClick={handleBugScraperSync}
+            disabled={bugScraperLoading}
+            className="rounded-lg border border-slate-600/70 bg-slate-900/60 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:border-emerald-500/60 hover:bg-slate-900 disabled:opacity-50 transition"
           >
-            <option value="">Todas</option>
-            {[1, 2, 3, 4, 5, 6, 7].map((n) => (
-              <option key={n} value={n}>Etapa {n}</option>
-            ))}
-          </select>
-          </div>
+            {bugScraperLoading ? "Sync..." : "Bug Scraper"}
+          </button>
+          {bugScraperInserted !== null && (
+            <span className="text-[11px] text-slate-400">
+              {bugScraperInserted > 0
+                ? `+${bugScraperInserted} programa(s)`
+                : "Nenhum novo"}
+            </span>
+          )}
         </div>
       </div>
 
@@ -991,24 +1078,27 @@ export default function BountyPanel() {
         </div>
       )}
 
-      {/* Program list */}
+      {/* Program cards */}
       {programs.length === 0 && !showForm && (
         <p className="text-center text-sm text-slate-500 py-6">
-          Nenhum programa cadastrado. Clique &quot;+ Novo Programa&quot; para comecar.
+          Nenhum programa cadastrado. Clique &quot;+ Novo&quot; para comecar.
         </p>
       )}
 
       {filterFlowStep !== "" && programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep).length === 0 && programs.length > 0 && (
         <p className="text-center text-sm text-slate-500 py-4">
-          Nenhum programa na etapa {filterFlowStep}. Altere o filtro ou avance os programas.
+          Nenhum programa na etapa {filterFlowStep}.
         </p>
       )}
 
-      <div className="space-y-3">
+      <div className="rounded-xl border border-slate-700/50 bg-slate-900/30 overflow-hidden divide-y divide-slate-800/60">
         {(filterFlowStep === "" ? programs : programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep)).map(p => {
-          const isExpanded = expandedProgram === p.id;
           const isReconRunning = p.status === "reconning" || reconning.has(p.id);
-          const reconButtonLabel = isReconRunning ? "Recon..." : p.status === "error" ? "Recon (retry)" : "Recon";
+          const isH1 = p.platform === "hackerone" && (p.url || "").includes("hackerone.com");
+          const isH1Ready = isH1 && (p.flow_step ?? 1) >= 6;
+          const hasBounty = p.has_bounty === true;
+          const dotColor = p.status === "reconning" ? "bg-blue-400" : p.status === "error" ? "bg-red-400" : isH1Ready ? "bg-orange-400" : "bg-emerald-400";
+          const isOpen = expandedProgram === p.id;
           const highOnly = highOnlyByProgram[p.id] === true;
           const visibleTargets = highOnly
             ? targets.filter(t => (t.recon_checks?.high ?? 0) > 0)
@@ -1022,337 +1112,339 @@ export default function BountyPanel() {
               return (b.recon_checks?.total_findings ?? 0) - (a.recon_checks?.total_findings ?? 0);
             })
             .slice(0, 5);
+
           return (
-            <Fragment key={p.id}>
+            <div key={p.id} className={isH1Ready ? "bg-orange-500/[0.03]" : ""}>
+              {/* Row header — always visible */}
               <div
-                className={`group rounded-xl border transition-colors ${
-                  isExpanded
-                    ? "border-emerald-500/60 bg-slate-900/70 shadow-[0_0_0_1px_rgba(16,185,129,0.25)]"
-                    : "border-slate-700/60 bg-slate-900/40 hover:border-emerald-500/40 hover:bg-slate-900/60"
-                }`}
+                onClick={() => {
+                  if (isOpen) { setExpandedProgram(null); }
+                  else { setExpandedProgram(p.id); loadTargets(p.id); }
+                }}
+                className="flex items-center gap-2 px-3 py-2.5 sm:px-4 sm:py-3 cursor-pointer hover:bg-slate-800/30 transition-colors group"
               >
-                {/* Header */}
-                <div
-                  className="flex flex-col gap-2 px-4 py-3 cursor-pointer sm:flex-row sm:items-center sm:justify-between"
-                  onClick={() => setExpandedProgram(isExpanded ? null : p.id)}
-                >
-                  <div className="flex flex-col gap-1 min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[10px] font-bold uppercase px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                        {p.platform || "N/A"}
-                      </span>
-                      <span className="font-semibold text-white truncate">{p.name}</span>
+                {/* Expand chevron */}
+                <svg className={`w-3.5 h-3.5 text-slate-500 shrink-0 transition-transform ${isOpen ? "rotate-90" : ""}`} fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+                </svg>
+
+                {/* Status dot */}
+                <span className={`h-2 w-2 rounded-full shrink-0 ${dotColor} ${isReconRunning ? "animate-pulse" : ""}`} />
+
+                {/* Name */}
+                <span className={`text-sm font-medium truncate min-w-0 flex-1 ${
+                  isH1Ready ? "text-orange-200" : "text-white"
+                }`}>
+                  {p.name}
+                </span>
+
+                {/* Badges */}
+                <div className="flex items-center gap-1 shrink-0">
+                  <span className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                    isH1
+                      ? "bg-orange-500/20 text-orange-300 border-orange-500/30"
+                      : "bg-purple-500/20 text-purple-300 border-purple-500/30"
+                  }`}>
+                    {p.platform || "?"}
+                  </span>
+                  {hasBounty && (
+                    <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-green-500/20 text-green-300 border border-green-500/30">$</span>
+                  )}
+                  {isH1Ready && (
+                    <span className="text-[9px] font-bold px-1 py-0.5 rounded bg-orange-500/25 text-orange-300 border border-orange-500/40 animate-pulse">H1</span>
+                  )}
+                </div>
+
+                {/* Counters */}
+                <div className="hidden sm:flex items-center gap-3 shrink-0 text-[11px] tabular-nums">
+                  <span className="text-slate-400">{p.target_count ?? 0} <span className="text-slate-600">tgt</span></span>
+                  <span className="text-emerald-400">{p.alive_count ?? 0} <span className="text-slate-600">up</span></span>
+                  <span className="text-red-400">{p.vuln_count ?? 0} <span className="text-slate-600">vln</span></span>
+                </div>
+
+                {/* Step */}
+                <span className={`text-[10px] shrink-0 tabular-nums ${isH1 ? "text-orange-400/70" : "text-slate-500"}`}>
+                  {p.flow_step ?? 1}/7
+                </span>
+              </div>
+
+              {/* Expanded content — inline */}
+              {isOpen && (
+                <div className="border-t border-slate-700/40 bg-slate-950/40 px-4 py-4 sm:px-6 space-y-4">
+                  {/* Mobile counters */}
+                  <div className="sm:hidden grid grid-cols-3 gap-2">
+                    <div className="rounded-lg bg-slate-800/60 px-2 py-1.5 text-center">
+                      <div className="text-sm font-bold text-white tabular-nums">{p.target_count ?? 0}</div>
+                      <div className="text-[9px] text-slate-500 uppercase">Targets</div>
                     </div>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-slate-400">
-                      <span className={`inline-flex items-center gap-1 text-[10px] font-semibold uppercase px-1.5 py-0.5 rounded-full border ${
-                        p.status === "reconning"
-                          ? "bg-blue-500/15 text-blue-300 border-blue-500/40"
-                          : p.status === "error"
-                            ? "bg-red-500/15 text-red-300 border-red-500/40"
-                            : "bg-emerald-500/15 text-emerald-300 border-emerald-500/40"
-                      }`}>
-                        <span
-                          className={`h-1.5 w-1.5 rounded-full ${
-                            p.status === "reconning"
-                              ? "bg-blue-400"
-                              : p.status === "error"
-                                ? "bg-red-400"
-                                : "bg-emerald-400"
-                          }`}
-                        />
-                        {p.status || "active"}
-                      </span>
-                      <span className="text-slate-500">
-                        {p.in_scope?.length ?? 0} escopo(s)
-                      </span>
-                      <span
-                        className="inline-flex items-center gap-1 text-[10px] text-slate-300 border border-slate-600/80 rounded-full px-2 py-0.5"
-                        title="Etapa do fluxo HackerOne"
-                      >
-                        <span className="h-1 w-1 rounded-full bg-emerald-400/80" />
-                        Etapa {(p.flow_step ?? 1)}
-                      </span>
+                    <div className="rounded-lg bg-slate-800/60 px-2 py-1.5 text-center">
+                      <div className="text-sm font-bold text-emerald-400 tabular-nums">{p.alive_count ?? 0}</div>
+                      <div className="text-[9px] text-slate-500 uppercase">Vivos</div>
                     </div>
-                    {p.status === "error" && p.last_recon_error && (
-                      <p className="text-[11px] text-amber-300/90">
-                        Recon: {p.last_recon_error}
-                      </p>
-                    )}
+                    <div className="rounded-lg bg-slate-800/60 px-2 py-1.5 text-center">
+                      <div className="text-sm font-bold text-red-400 tabular-nums">{p.vuln_count ?? 0}</div>
+                      <div className="text-[9px] text-slate-500 uppercase">Vulns</div>
+                    </div>
                   </div>
 
-                  <div className="flex items-center gap-3 text-xs shrink-0">
-                    <span className="text-slate-400">{p.target_count ?? 0} targets</span>
-                    <span className="text-green-400">{p.alive_count ?? 0} vivos</span>
-                    <span className="text-red-400">{p.vuln_count ?? 0} vulns</span>
+                  {/* Info + URL */}
+                  {p.url && (
+                    <a href={p.url} target="_blank" rel="noopener noreferrer" className="text-xs text-accent hover:underline truncate block">
+                      {p.url}
+                    </a>
+                  )}
+                  {hasBounty && (p.bounty_min || p.bounty_max) && (
+                    <span className="text-[11px] text-green-400 font-semibold">
+                      {p.bounty_currency || "USD"} {p.bounty_min ?? "?"} – {p.bounty_max ?? "?"}
+                    </span>
+                  )}
 
-                    {(p.status === "error" || p.status === "reconning") && (
-                      <button
-                        onClick={e => { e.stopPropagation(); handleClearError(p.id); }}
-                        className={`rounded px-2.5 py-1 text-[11px] font-semibold text-white transition ${
-                          p.status === "reconning" ? "bg-slate-600 hover:bg-slate-500" : "bg-amber-600 hover:bg-amber-500"
-                        }`}
-                      >
-                        {p.status === "reconning" ? "Cancelar recon" : "Limpar erro"}
-                      </button>
-                    )}
+                  {p.status === "error" && p.last_recon_error && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+                      {p.last_recon_error}
+                    </div>
+                  )}
+
+                  {/* Actions */}
+                  <div className="flex flex-wrap gap-2">
                     <button
-                      onClick={e => { e.stopPropagation(); handleRecon(p.id); }}
+                      onClick={() => handleRecon(p.id)}
                       disabled={isReconRunning}
-                      className="rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-2.5 py-1 text-[11px] font-semibold text-white transition"
+                      className="rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-3 py-1.5 text-xs font-semibold text-white transition"
                     >
-                      {reconButtonLabel}
+                      {isReconRunning ? "Recon..." : "Recon"}
                     </button>
                     <button
-                      onClick={e => { e.stopPropagation(); handleReport(p.id); }}
+                      onClick={() => handleReport(p.id)}
                       disabled={reportLoading === p.id}
-                      className="rounded bg-slate-600 hover:bg-slate-500 disabled:opacity-40 px-2.5 py-1 text-[11px] font-semibold text-white transition"
+                      className="rounded-lg bg-slate-600 hover:bg-slate-500 disabled:opacity-40 px-3 py-1.5 text-xs font-semibold text-white transition"
                     >
                       {reportLoading === p.id ? "..." : "Report"}
                     </button>
-                    {(p.platform === "hackerone" && (p.url || "").includes("hackerone.com")) && (
+                    {isH1 && (
                       <button
-                        onClick={e => { e.stopPropagation(); handleSubmitHackerOne(p.id); }}
+                        onClick={() => handleSubmitHackerOne(p.id)}
                         disabled={submitHackerOneLoading === p.id}
-                        className="rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 px-2.5 py-1 text-[11px] font-semibold text-white transition"
+                        className="rounded-lg bg-orange-600 hover:bg-orange-500 disabled:opacity-40 px-3 py-1.5 text-xs font-semibold text-white transition"
                       >
-                        {submitHackerOneLoading === p.id ? "..." : "Enviar ao HackerOne"}
+                        {submitHackerOneLoading === p.id ? "..." : "Enviar H1"}
+                      </button>
+                    )}
+                    {(p.status === "error" || p.status === "reconning") && (
+                      <button
+                        onClick={() => handleClearError(p.id)}
+                        className="rounded-lg bg-amber-600 hover:bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white transition"
+                      >
+                        {p.status === "reconning" ? "Cancelar" : "Limpar Erro"}
                       </button>
                     )}
                     <button
-                      onClick={e => { e.stopPropagation(); handleDelete(p.id); }}
-                      className="rounded bg-red-700/60 hover:bg-red-600 px-2 py-1 text-[11px] font-semibold text-red-200 transition"
+                      onClick={() => { handleDelete(p.id); setExpandedProgram(null); }}
+                      className="rounded-lg bg-red-700/60 hover:bg-red-600 px-3 py-1.5 text-xs font-semibold text-red-200 transition ml-auto"
                     >
-                      X
+                      Excluir
                     </button>
-
-                    <svg
-                      className={`w-4 h-4 text-slate-400 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-                      fill="none" viewBox="0 0 24 24" stroke="currentColor"
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                    </svg>
                   </div>
-                </div>
 
-                {/* Expanded: Fluxo HackerOne + targets table */}
-                {isExpanded && (
-                  <div className="border-t border-slate-700/40 px-4 py-3">
-                    {/* Fluxo HackerOne (algoritmo 1–7) */}
-                    {flowByProgram[p.id] && (
-                      <div className="mb-4 rounded-lg border border-slate-700/70 bg-slate-950/60 p-3">
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
-                            Fluxo HackerOne
-                          </p>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
-                            Passo {flowByProgram[p.id].current_step} de 7
-                          </span>
-                        </div>
-                        <ol className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 text-[11px]">
-                          {flowByProgram[p.id].steps.map((s) => (
-                            <li
-                              key={s.n}
-                              className={`flex items-center gap-2 rounded-lg border px-2 py-1 ${
-                                s.done
-                                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200"
-                                  : "border-slate-700/70 bg-slate-900/70 text-slate-300"
-                              }`}
-                            >
-                              <span
-                                className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-semibold ${
-                                  s.done
-                                    ? "bg-emerald-500 text-slate-950"
-                                    : "bg-slate-800 text-slate-300"
-                                }`}
-                              >
-                                {s.done ? "✓" : s.n}
-                              </span>
-                              <span className="leading-snug">{s.label}</span>
-                            </li>
-                          ))}
-                        </ol>
+                  {/* Flow HackerOne */}
+                  {flowByProgram[p.id] && (
+                    <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3">
+                      <div className="mb-2 flex items-center justify-between">
+                        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Fluxo</span>
+                        <span className="text-[10px] font-medium text-emerald-300">Passo {flowByProgram[p.id].current_step}/7</span>
                       </div>
-                    )}
-                    {/* Scope info */}
-                    <div className="mb-3 flex flex-wrap gap-4 text-xs text-slate-400">
-                      <div>
-                        <span className="font-semibold text-slate-300">In-scope:</span>{" "}
-                        {(p.in_scope ?? []).map((s: string, i: number) => (
-                          <code key={i} className="ml-1 rounded bg-slate-700/40 px-1 py-0.5 text-emerald-300">{s}</code>
+                      <div className="flex flex-wrap gap-1 text-[10px]">
+                        {flowByProgram[p.id].steps.map((s) => (
+                          <span
+                            key={s.n}
+                            className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 border ${
+                              s.done
+                                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                                : "border-slate-700/70 text-slate-500"
+                            }`}
+                          >
+                            {s.done ? "✓" : s.n}
+                          </span>
                         ))}
                       </div>
-                      {(p.out_of_scope ?? []).length > 0 && (
-                        <div>
-                          <span className="font-semibold text-slate-300">Out-of-scope:</span>{" "}
-                          {p.out_of_scope.map((s: string, i: number) => (
-                            <code key={i} className="ml-1 rounded bg-slate-700/40 px-1 py-0.5 text-red-300">{s}</code>
-                          ))}
+                    </div>
+                  )}
+
+                  {/* Scope */}
+                  <div className="flex flex-wrap gap-1">
+                    {(p.in_scope ?? []).map((s: string, i: number) => (
+                      <code key={i} className="rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-300">{s}</code>
+                    ))}
+                    {(p.out_of_scope ?? []).map((s: string, i: number) => (
+                      <code key={`o${i}`} className="rounded bg-red-500/10 border border-red-500/20 px-1.5 py-0.5 text-[10px] text-red-300 line-through">{s}</code>
+                    ))}
+                  </div>
+
+                  {/* Recon Intelligence */}
+                  {p.stats && ((p.stats.asns_discovered ?? 0) > 0 || (p.stats.new_subdomains ?? 0) > 0) && (
+                    <div className="flex flex-wrap gap-2">
+                      {(p.stats.asns_discovered ?? 0) > 0 && (
+                        <div className="rounded-lg bg-violet-500/10 border border-violet-500/20 px-2.5 py-1.5">
+                          <div className="text-sm font-bold text-violet-300 tabular-nums">{p.stats.asns_discovered}</div>
+                          <div className="text-[9px] text-slate-400">ASNs</div>
                         </div>
                       )}
+                      {(p.stats.org_prefixes ?? 0) > 0 && (
+                        <div className="rounded-lg bg-amber-500/10 border border-amber-500/20 px-2.5 py-1.5">
+                          <div className="text-sm font-bold text-amber-300 tabular-nums">{p.stats.org_prefixes}</div>
+                          <div className="text-[9px] text-slate-400">Prefixos</div>
+                        </div>
+                      )}
+                      {(p.stats.new_subdomains ?? 0) > 0 && (
+                        <div className="rounded-lg bg-lime-500/10 border border-lime-500/20 px-2.5 py-1.5">
+                          <div className="text-sm font-bold text-lime-300 tabular-nums">{p.stats.new_subdomains}</div>
+                          <div className="text-[9px] text-slate-400">Novos subs</div>
+                        </div>
+                      )}
+                      <div className="rounded-lg bg-slate-700/30 border border-slate-600/30 px-2.5 py-1.5">
+                        <div className="text-sm font-bold text-slate-200 tabular-nums">{p.stats.subdomains ?? 0}</div>
+                        <div className="text-[9px] text-slate-400">Total</div>
+                      </div>
                     </div>
-                    <div className="mb-3 flex items-center justify-between gap-2">
-                      <label className="inline-flex items-center gap-2 text-xs text-slate-300">
-                        <input
-                          type="checkbox"
-                          checked={highOnly}
-                          onChange={(e) =>
-                            setHighOnlyByProgram(prev => ({ ...prev, [p.id]: e.target.checked }))
-                          }
-                          className="rounded border-slate-600 bg-slate-900"
-                        />
-                        Mostrar somente alvos com achados HIGH
-                      </label>
-                      <button
-                        type="button"
-                        onClick={() => handleExportTopTargets(p, prioritizedTargets)}
-                        className="rounded bg-slate-700 hover:bg-slate-600 px-2.5 py-1 text-[11px] font-semibold text-white transition"
-                      >
-                        Exportar top-targets.md
-                      </button>
+                  )}
+
+                  {/* Recent Changes */}
+                  {changes.length > 0 && (
+                    <div className="rounded-lg border border-lime-500/20 bg-lime-500/5 p-3">
+                      <div className="text-[10px] font-semibold uppercase tracking-wider text-lime-300 mb-2">Mudanças</div>
+                      <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                        {changes.map((ch) => (
+                          <div key={ch.id} className="text-[10px]">
+                            <span className="text-slate-500">{new Date(ch.timestamp).toLocaleString("pt-BR")}</span>
+                            {ch.new_subdomains.length > 0 && (
+                              <span className="text-emerald-400 ml-2">+{ch.new_subdomains.length} novos</span>
+                            )}
+                            {ch.removed_subdomains.length > 0 && (
+                              <span className="text-red-400 ml-2">-{ch.removed_subdomains.length}</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Targets */}
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                        Targets ({visibleTargets.length})
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <label className="inline-flex items-center gap-1.5 text-[10px] text-slate-400 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={highOnly}
+                            onChange={(e) => setHighOnlyByProgram(prev => ({ ...prev, [p.id]: e.target.checked }))}
+                            className="rounded border-slate-600 bg-slate-900 h-3 w-3"
+                          />
+                          HIGH
+                        </label>
+                        <button
+                          onClick={() => handleExportTopTargets(p, prioritizedTargets)}
+                          className="rounded bg-slate-700 hover:bg-slate-600 px-2 py-0.5 text-[10px] font-semibold text-white transition"
+                        >
+                          Export
+                        </button>
+                      </div>
                     </div>
 
                     {loadingTargets ? (
-                      <p className="text-xs text-slate-500 py-2">Carregando targets...</p>
+                      <p className="text-xs text-slate-500 py-2 text-center">Carregando...</p>
                     ) : visibleTargets.length === 0 ? (
-                      <p className="text-xs text-slate-500 py-2">Nenhum target encontrado. Execute &quot;Recon&quot; primeiro.</p>
+                      <p className="text-xs text-slate-500 py-2 text-center">Sem targets. Execute Recon.</p>
                     ) : (
-                      <div className="space-y-3">
-                        <div className="overflow-x-auto max-h-80 overflow-y-auto">
-                          <table className="w-full text-xs">
-                            <thead className="sticky top-0 bg-slate-800">
-                              <tr className="text-left text-slate-400 border-b border-slate-700/50">
-                                <th className="py-1.5 px-2">Dominio</th>
-                                <th className="py-1.5 px-2">IPs</th>
-                                <th className="py-1.5 px-2">Status</th>
-                                <th className="py-1.5 px-2">HTTP</th>
-                                <th className="py-1.5 px-2">Tech</th>
-                                <th className="py-1.5 px-2">Checks</th>
-                                <th className="py-1.5 px-2 text-right">Acao</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {visibleTargets.map(t => (
-                                <tr key={t.id} className="border-b border-slate-700/30 hover:bg-slate-700/20">
-                                  <td className="py-1.5 px-2 font-mono text-emerald-300">{t.domain}</td>
-                                  <td className="py-1.5 px-2 text-slate-300">{(t.ips ?? []).join(", ") || "-"}</td>
-                                  <td className={`py-1.5 px-2 font-semibold ${STATUS_COLORS[t.status] ?? "text-slate-400"}`}>
-                                    {t.status}
-                                  </td>
-                                  <td className="py-1.5 px-2 text-slate-300">
-                                    {t.httpx?.status_code ? `${t.httpx.status_code}` : "-"}
-                                    {t.httpx?.title ? ` - ${t.httpx.title.slice(0, 30)}` : ""}
-                                  </td>
-                                  <td className="py-1.5 px-2 text-slate-400">
-                                    {(t.httpx?.tech ?? []).slice(0, 3).join(", ") || "-"}
-                                  </td>
-                                  <td className="py-1.5 px-2 text-slate-300">
-                                    {t.recon_checks?.checked ? (
-                                      <span
-                                        className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold ${
-                                          (t.recon_checks?.high ?? 0) > 0
-                                            ? "bg-red-500/20 text-red-300"
-                                            : (t.recon_checks?.medium ?? 0) > 0
-                                              ? "bg-amber-500/20 text-amber-300"
-                                              : (t.recon_checks?.total_findings ?? 0) > 0
-                                                ? "bg-slate-600/40 text-slate-200"
-                                                : "bg-emerald-500/20 text-emerald-300"
-                                        }`}
-                                        title={(t.recon_checks?.findings ?? []).map(f => `${f.severity}: ${f.title}`).join(" | ")}
-                                      >
-                                        {t.recon_checks?.total_findings ?? 0} achado(s)
-                                        {(t.recon_checks?.high ?? 0) > 0 ? ` | H:${t.recon_checks?.high}` : ""}
-                                      </span>
-                                    ) : (
-                                      "-"
-                                    )}
-                                  </td>
-                                  <td className="py-1.5 px-2 text-right">
-                                    <div className="inline-flex flex-wrap items-center gap-1">
-                                      <button
-                                        onClick={() => handleCopyTemplate(p, t)}
-                                        className="rounded bg-slate-600 hover:bg-slate-500 px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                      >
-                                        {copiedTemplateId === t.id ? "Copiado" : "Template"}
-                                      </button>
-                                      {p.platform === "hackerone" && (p.url || "").includes("hackerone.com") && (
-                                        <button
-                                          onClick={() => handleSubmitTargetToHackerOne(p, t)}
-                                          disabled={submitTargetToH1Loading === t.id || !targetFulfillsHackerOneRules(t)}
-                                          title={!targetFulfillsHackerOneRules(t) ? "Requer ao menos 1 finding do recon com título e evidência (regras HackerOne)" : "Enviar report ao HackerOne"}
-                                          className="rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                        >
-                                          {submitTargetToH1Loading === t.id ? "..." : "Enviar ao H1"}
-                                        </button>
-                                      )}
-                                      <button
-                                        onClick={() => handleOpenTarget(t)}
-                                        className="rounded bg-sky-700 hover:bg-sky-600 px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                      >
-                                        Abrir
-                                      </button>
-                                      <button
-                                        onClick={() => handleScanTarget(t.id)}
-                                        disabled={scanningTargets.has(t.id) || !t.alive}
-                                        className="rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-30 px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                      >
-                                        {scanningTargets.has(t.id) ? "..." : "Scan"}
-                                      </button>
-                                    </div>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                        <div className="rounded border border-slate-700/40 bg-slate-900/30 p-3">
-                          <p className="text-[11px] font-semibold text-slate-300 uppercase tracking-wider">
-                            Plano de Caca (Top 5 por risco)
-                          </p>
-                          {prioritizedTargets.length === 0 ? (
-                            <p className="mt-2 text-xs text-slate-500">Sem targets vivos para priorizacao ainda.</p>
-                          ) : (
-                            <div className="mt-2 space-y-1.5">
-                              {prioritizedTargets.map((t, idx) => (
-                                <div key={t.id} className="flex items-center justify-between gap-2 text-xs">
-                                  <div>
-                                    <span className="text-slate-400 mr-2">#{idx + 1}</span>
-                                    <span className="font-mono text-emerald-300">{t.domain}</span>
-                                    <span className="text-slate-500 ml-2">
-                                      score {t.recon_checks?.risk_score ?? 0} | achados {t.recon_checks?.total_findings ?? 0}
+                      <div className="space-y-1 max-h-64 overflow-y-auto">
+                        {visibleTargets.map(t => (
+                          <div key={t.id} className="rounded-lg border border-slate-700/40 bg-slate-800/30 px-3 py-2 hover:bg-slate-800/50 transition-colors">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2">
+                                  <span className="font-mono text-emerald-300 text-xs truncate">{t.domain}</span>
+                                  {t.is_new && (
+                                    <span className="rounded bg-lime-500/20 border border-lime-500/40 px-1 py-0.5 text-[8px] font-bold text-lime-300 uppercase animate-pulse">
+                                      NEW
                                     </span>
-                                  </div>
-                                  <div className="inline-flex gap-1">
-                                    <button
-                                      onClick={() => handleCopyTemplate(p, t)}
-                                      className="rounded bg-sky-700 hover:bg-sky-600 px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                    >
-                                      Copiar report
-                                    </button>
-                                    {p.platform === "hackerone" && (p.url || "").includes("hackerone.com") && (
-                                      <button
-                                        onClick={() => handleSubmitTargetToHackerOne(p, t)}
-                                        disabled={submitTargetToH1Loading === t.id || !targetFulfillsHackerOneRules(t)}
-                                        title={!targetFulfillsHackerOneRules(t) ? "Requer ao menos 1 finding com título e evidência" : "Enviar ao HackerOne"}
-                                        className="rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                      >
-                                        {submitTargetToH1Loading === t.id ? "..." : "Enviar ao H1"}
-                                      </button>
-                                    )}
-                                  </div>
+                                  )}
+                                  <span className={`text-[9px] font-semibold uppercase ${STATUS_COLORS[t.status] ?? "text-slate-400"}`}>
+                                    {t.status}
+                                  </span>
                                 </div>
-                              ))}
+                                <div className="flex items-center gap-2 mt-0.5 text-[10px] text-slate-500">
+                                  {t.httpx?.status_code && <span>{t.httpx.status_code}</span>}
+                                  {(t.httpx?.tech ?? []).length > 0 && <span>{t.httpx!.tech!.slice(0, 2).join(", ")}</span>}
+                                  {t.recon_checks?.checked && (
+                                    <span className={
+                                      (t.recon_checks?.high ?? 0) > 0 ? "text-red-300 font-semibold"
+                                      : (t.recon_checks?.total_findings ?? 0) > 0 ? "text-amber-300"
+                                      : "text-emerald-300"
+                                    }>
+                                      {t.recon_checks?.total_findings ?? 0} achado(s)
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <button onClick={() => handleCopyTemplate(p, t)} className="rounded bg-slate-600 hover:bg-slate-500 px-2 py-0.5 text-[10px] font-semibold text-white transition">
+                                  {copiedTemplateId === t.id ? "OK" : "Tmpl"}
+                                </button>
+                                <button onClick={() => handleOpenTarget(t)} className="rounded bg-sky-700 hover:bg-sky-600 px-2 py-0.5 text-[10px] font-semibold text-white transition">
+                                  Abrir
+                                </button>
+                                <button
+                                  onClick={() => handleScanTarget(t.id)}
+                                  disabled={scanningTargets.has(t.id) || !t.alive}
+                                  className="rounded bg-amber-600 hover:bg-amber-500 disabled:opacity-30 px-2 py-0.5 text-[10px] font-semibold text-white transition"
+                                >
+                                  {scanningTargets.has(t.id) ? "..." : "Scan"}
+                                </button>
+                                {isH1 && (
+                                  <button
+                                    onClick={() => handleSubmitTargetToHackerOne(p, t)}
+                                    disabled={submitTargetToH1Loading === t.id || !targetFulfillsHackerOneRules(t)}
+                                    className="rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 px-2 py-0.5 text-[10px] font-semibold text-white transition"
+                                  >
+                                    {submitTargetToH1Loading === t.id ? "..." : "H1"}
+                                  </button>
+                                )}
+                              </div>
                             </div>
-                          )}
-                          <div className="mt-3 text-[11px] text-slate-400">
-                            Checklist rapido: validar impacto real, reproduzir sem dano, coletar prova e enviar report claro.
                           </div>
-                        </div>
+                        ))}
                       </div>
                     )}
                   </div>
-                )}
-              </div>
-            </Fragment>
+
+                  {/* Top 5 */}
+                  {prioritizedTargets.length > 0 && (
+                    <div className="rounded-lg border border-slate-700/40 bg-slate-900/40 p-3">
+                      <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider mb-1.5">Top 5</div>
+                      <div className="space-y-1">
+                        {prioritizedTargets.map((t, idx) => (
+                          <div key={t.id} className="flex items-center justify-between gap-2 text-xs">
+                            <div className="min-w-0 flex items-center gap-2">
+                              <span className="text-slate-500 font-bold w-3 text-right shrink-0">{idx + 1}</span>
+                              <span className="font-mono text-emerald-300 truncate">{t.domain}</span>
+                              <span className="text-slate-500 shrink-0">{t.recon_checks?.risk_score ?? 0}pts</span>
+                            </div>
+                            <button
+                              onClick={() => handleCopyTemplate(p, t)}
+                              className="rounded bg-sky-700 hover:bg-sky-600 px-2 py-0.5 text-[10px] font-semibold text-white transition shrink-0"
+                            >
+                              Report
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
@@ -1360,15 +1452,15 @@ export default function BountyPanel() {
       {/* Preview do template copiado */}
       {templatePreview && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 sm:p-4"
           onClick={() => setTemplatePreview(null)}
         >
           <div
-            className="relative max-h-[85vh] w-full max-w-2xl rounded-lg border border-slate-600 bg-slate-900 shadow-xl"
+            className="relative w-full max-h-[90vh] sm:max-h-[85vh] sm:max-w-2xl rounded-t-xl sm:rounded-xl border border-slate-600 bg-slate-900 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-700 px-4 py-2">
-              <span className="text-sm font-semibold text-slate-200">Report copiado — preview</span>
+            <div className="flex items-center justify-between border-b border-slate-700 px-3 py-2 sm:px-4">
+              <span className="text-sm font-semibold text-slate-200">Preview</span>
               <button
                 type="button"
                 onClick={() => setTemplatePreview(null)}
@@ -1377,7 +1469,7 @@ export default function BountyPanel() {
                 Fechar
               </button>
             </div>
-            <pre className="max-h-[70vh] overflow-auto whitespace-pre-wrap p-4 text-left text-xs text-slate-300">
+            <pre className="max-h-[75vh] sm:max-h-[70vh] overflow-auto whitespace-pre-wrap p-3 sm:p-4 text-left text-xs text-slate-300">
               {templatePreview}
             </pre>
           </div>

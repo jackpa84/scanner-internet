@@ -50,3 +50,4 @@ nuclei-templates/
 # Misc
 *.bak
 *.tmp
+.mypy_cache/

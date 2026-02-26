@@ -18,6 +18,11 @@ spec:
         - name: app
           image: scanner-app:latest
           imagePullPolicy: IfNotPresent
+          securityContext:
+            capabilities:
+              add:
+                - NET_RAW
+                - NET_ADMIN
           ports:
             - containerPort: 5000
           env:
