@@ -1092,7 +1092,18 @@ export default function BountyPanel() {
       )}
 
       <div className="rounded-xl border border-slate-700/50 bg-slate-900/30 overflow-hidden divide-y divide-slate-800/60">
-        {(filterFlowStep === "" ? programs : programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep)).map(p => {
+        {(filterFlowStep === "" ? programs : programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep))
+          .slice()
+          .sort((a, b) => {
+            const aHasRecon = a.last_recon ? 1 : 0;
+            const bHasRecon = b.last_recon ? 1 : 0;
+            if (aHasRecon !== bHasRecon) return bHasRecon - aHasRecon;
+            const aAlive = a.alive_count ?? 0;
+            const bAlive = b.alive_count ?? 0;
+            if (aAlive !== bAlive) return bAlive - aAlive;
+            return (b.vuln_count ?? 0) - (a.vuln_count ?? 0);
+          })
+          .map(p => {
           const isReconRunning = p.status === "reconning" || reconning.has(p.id);
           const isH1 = p.platform === "hackerone" && (p.url || "").includes("hackerone.com");
           const isH1Ready = isH1 && (p.flow_step ?? 1) >= 6;
