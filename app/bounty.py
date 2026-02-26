@@ -506,14 +506,14 @@ def discover_target_asns(resolved_ips: list[str]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # httpx — HTTP probe
 # ---------------------------------------------------------------------------
-def run_httpx_probe(targets: list[str]) -> list[dict[str, Any]]:
-    """Run httpx to probe which targets are alive and gather HTTP metadata."""
-    if not targets:
-        return []
+HTTPX_BATCH_SIZE = 200
 
+
+def _httpx_batch(batch: list[str]) -> list[dict[str, Any]]:
+    """Run httpx on a batch of targets."""
     alive = []
     with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-        for t in targets:
+        for t in batch:
             f.write(t + "\n")
         targets_file = f.name
 
@@ -522,20 +522,21 @@ def run_httpx_probe(targets: list[str]) -> list[dict[str, Any]]:
         "-l", targets_file,
         "-json",
         "-silent",
-        "-timeout", "10",
-        "-retries", "1",
+        "-timeout", "8",
+        "-retries", "0",
         "-no-color",
         "-status-code",
         "-title",
         "-tech-detect",
         "-cdn",
         "-follow-redirects",
+        "-threads", "50",
     ]
 
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True,
-            timeout=HTTPX_TIMEOUT + 30,
+            timeout=HTTPX_TIMEOUT,
         )
 
         for line in result.stdout.strip().splitlines():
@@ -556,18 +557,12 @@ def run_httpx_probe(targets: list[str]) -> list[dict[str, Any]]:
                 })
             except json.JSONDecodeError:
                 continue
-
-        logger.info("[BOUNTY] httpx: %d/%d vivos", len(alive), len(targets))
-
     except subprocess.TimeoutExpired:
-        logger.warning("[BOUNTY] httpx timeout")
-        _inc_stat("errors")
+        logger.warning("[BOUNTY] httpx batch timeout (%d targets)", len(batch))
     except FileNotFoundError:
         logger.error("[BOUNTY] httpx nao encontrado no PATH")
-        _inc_stat("errors")
     except Exception as e:
-        logger.error("[BOUNTY] httpx erro: %s", e)
-        _inc_stat("errors")
+        logger.error("[BOUNTY] httpx batch erro: %s", e)
     finally:
         try:
             os.unlink(targets_file)
@@ -575,6 +570,24 @@ def run_httpx_probe(targets: list[str]) -> list[dict[str, Any]]:
             pass
 
     return alive
+
+
+def run_httpx_probe(targets: list[str]) -> list[dict[str, Any]]:
+    """Run httpx in batches to probe which targets are alive."""
+    if not targets:
+        return []
+
+    all_alive: list[dict[str, Any]] = []
+    for i in range(0, len(targets), HTTPX_BATCH_SIZE):
+        batch = targets[i:i + HTTPX_BATCH_SIZE]
+        batch_alive = _httpx_batch(batch)
+        all_alive.extend(batch_alive)
+        logger.info("[BOUNTY] httpx batch %d-%d: %d/%d vivos",
+                    i + 1, min(i + HTTPX_BATCH_SIZE, len(targets)),
+                    len(batch_alive), len(batch))
+
+    logger.info("[BOUNTY] httpx total: %d/%d vivos", len(all_alive), len(targets))
+    return all_alive
 
 
 def _add_recon_finding(result: dict[str, Any], severity: str, code: str, title: str, evidence: str = "") -> None:

@@ -119,17 +119,16 @@ def run_nuclei_scan(ip: str, ports: list[int] | None = None, cves: list[str] | N
         "-severity", NUCLEI_SEVERITY,
         "-jsonl",
         "-silent",
-        "-timeout", str(NUCLEI_TIMEOUT),
-        "-retries", "1",
-        "-bulk-size", "10",
-        "-rate-limit", "50",
+        "-timeout", "10",
+        "-retries", "0",
+        "-bulk-size", "25",
+        "-rate-limit", "150",
+        "-concurrency", "25",
         "-no-color",
         "-stats=false",
+        "-tags", "cve,exposure,misconfig,takeover,default-login,token,xss,sqli,ssrf,lfi,rce,idor",
+        "-exclude-tags", "dos,fuzz,tech,wp-plugin,intrusive",
     ]
-
-    if cves:
-        for cve in cves[:10]:
-            cmd.extend(["-tags", cve.lower()])
 
     findings = []
     try:
