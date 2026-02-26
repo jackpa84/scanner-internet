@@ -1,19 +1,21 @@
 """
 Bug Bounty mode: gerenciamento de programas, recon automatizado e scope validation.
 
-Pipeline expandido:
+Pipeline (14 etapas):
   1. Extract root domains
-  2. Subdomain enum: subfinder + crt.sh (Certificate Transparency)
+  2. Subdomain enum: 7 fontes paralelas (subfinder + crt.sh + AlienVault + HackerTarget + RapidDNS + Anubis + Wayback)
   3. Scope filter
   4. DNS resolve
-  5. ASN discovery → enumera IPs da organização alvo
-  6. Reverse DNS → descobre subdomínios adicionais a partir dos IPs
-  7. Second scope filter (novos subdomínios)
+  5. ASN discovery
+  6. Reverse DNS
+  7. Merge + second scope filter
   8. httpx probe
-  9. Security checks
+  9. Security checks (28+ probes + JS analysis)
   10. HTTP port scanner (opcional)
-  11. Change detection (novos subdomínios vs run anterior)
-  12. Save to MongoDB
+  11. Wayback Machine URLs
+  12. Change detection
+  13. Save to MongoDB
+  14. Nuclei auto-queue
 """
 
 import fnmatch
@@ -245,6 +247,169 @@ def run_crtsh_enum(domain: str) -> list[str]:
         logger.warning("[BOUNTY] crt.sh resposta invalida para %s", domain)
 
     return sorted(subdomains)
+
+
+# ---------------------------------------------------------------------------
+# Extra subdomain sources (all free, no API key needed)
+# ---------------------------------------------------------------------------
+def run_alienvault_enum(domain: str) -> list[str]:
+    """Query AlienVault OTX for passive DNS subdomains."""
+    subs: set[str] = set()
+    try:
+        url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "scanner/1.0"})
+        if resp.status_code != 200:
+            return []
+        for entry in resp.json().get("passive_dns", []):
+            hostname = (entry.get("hostname") or "").strip().lower()
+            if hostname and hostname.endswith(f".{domain}") and "." in hostname:
+                subs.add(hostname)
+        if subs:
+            logger.info("[BOUNTY] AlienVault %s: %d subdomínios", domain, len(subs))
+    except Exception as e:
+        logger.debug("[BOUNTY] AlienVault erro %s: %s", domain, e)
+    return sorted(subs)
+
+
+def run_hackertarget_enum(domain: str) -> list[str]:
+    """Query HackerTarget for subdomains (free, no key, 50/day limit)."""
+    subs: set[str] = set()
+    try:
+        url = f"https://api.hackertarget.com/hostsearch/?q={domain}"
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200 or "error" in resp.text.lower()[:50]:
+            return []
+        for line in resp.text.strip().splitlines():
+            parts = line.split(",")
+            if parts:
+                hostname = parts[0].strip().lower()
+                if hostname and "." in hostname:
+                    subs.add(hostname)
+        if subs:
+            logger.info("[BOUNTY] HackerTarget %s: %d subdomínios", domain, len(subs))
+    except Exception as e:
+        logger.debug("[BOUNTY] HackerTarget erro %s: %s", domain, e)
+    return sorted(subs)
+
+
+def run_rapiddns_enum(domain: str) -> list[str]:
+    """Query RapidDNS for subdomains."""
+    subs: set[str] = set()
+    try:
+        url = f"https://rapiddns.io/subdomain/{domain}?full=1"
+        resp = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            return []
+        for match in re.finditer(
+            r'<td>([a-zA-Z0-9._-]+\.' + re.escape(domain) + r')</td>',
+            resp.text,
+        ):
+            hostname = match.group(1).strip().lower()
+            if hostname and "." in hostname:
+                subs.add(hostname)
+        if subs:
+            logger.info("[BOUNTY] RapidDNS %s: %d subdomínios", domain, len(subs))
+    except Exception as e:
+        logger.debug("[BOUNTY] RapidDNS erro %s: %s", domain, e)
+    return sorted(subs)
+
+
+def run_anubis_enum(domain: str) -> list[str]:
+    """Query Anubis for subdomains."""
+    subs: set[str] = set()
+    try:
+        url = f"https://jldc.me/anubis/subdomains/{domain}"
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if isinstance(data, list):
+            for hostname in data:
+                hostname = hostname.strip().lower()
+                if hostname and "." in hostname:
+                    subs.add(hostname)
+        if subs:
+            logger.info("[BOUNTY] Anubis %s: %d subdomínios", domain, len(subs))
+    except Exception as e:
+        logger.debug("[BOUNTY] Anubis erro %s: %s", domain, e)
+    return sorted(subs)
+
+
+def run_wayback_subdomains(domain: str) -> list[str]:
+    """Extract subdomains from Wayback Machine CDX API."""
+    subs: set[str] = set()
+    try:
+        url = "https://web.archive.org/cdx/search/cdx"
+        params = {
+            "url": f"*.{domain}",
+            "output": "json",
+            "fl": "original",
+            "collapse": "urlkey",
+            "limit": "1000",
+        }
+        resp = requests.get(url, params=params, timeout=30)
+        if resp.status_code != 200:
+            return []
+        rows = resp.json()
+        for row in rows[1:]:
+            if not row or not row[0]:
+                continue
+            try:
+                parsed = urlsplit(row[0])
+                hostname = (parsed.hostname or "").strip().lower()
+                if hostname and hostname.endswith(f".{domain}") and "." in hostname:
+                    subs.add(hostname)
+            except Exception:
+                continue
+        if subs:
+            logger.info("[BOUNTY] Wayback subs %s: %d subdomínios", domain, len(subs))
+    except Exception as e:
+        logger.debug("[BOUNTY] Wayback subs erro %s: %s", domain, e)
+    return sorted(subs)
+
+
+def run_all_subdomain_sources(domain: str) -> set[str]:
+    """Run all subdomain enumeration sources in parallel and merge results."""
+    all_subs: set[str] = set()
+    lock = threading.Lock()
+
+    sources = [
+        ("subfinder", lambda: run_subdomain_enum(domain)),
+        ("crtsh", lambda: run_crtsh_enum(domain)),
+        ("alienvault", lambda: run_alienvault_enum(domain)),
+        ("hackertarget", lambda: run_hackertarget_enum(domain)),
+        ("rapiddns", lambda: run_rapiddns_enum(domain)),
+        ("anubis", lambda: run_anubis_enum(domain)),
+        ("wayback", lambda: run_wayback_subdomains(domain)),
+    ]
+
+    results: dict[str, list[str]] = {}
+
+    def _run(name: str, fn: Any) -> None:
+        try:
+            res = fn()
+            with lock:
+                results[name] = res
+                all_subs.update(res)
+        except Exception:
+            pass
+
+    threads = [
+        threading.Thread(target=_run, args=(name, fn), daemon=True)
+        for name, fn in sources
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    counts = {k: len(v) for k, v in results.items() if v}
+    total_unique = len(all_subs)
+    logger.info("[BOUNTY] %s → %d únicos | %s",
+                domain, total_unique,
+                " | ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+    return all_subs
 
 
 # ---------------------------------------------------------------------------
@@ -837,7 +1002,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
 
     prog_name = program.get("name", "?")
     logger.info("[RECON] ========== INICIO '%s' ==========", prog_name)
-    logger.info("[RECON] [1/12] Escopo: dominios=%s | in_scope=%s | out_of_scope=%s",
+    logger.info("[RECON] [1/14] Escopo: dominios=%s | in_scope=%s | out_of_scope=%s",
                 root_domains, in_scope[:5], out_of_scope[:5])
 
     # Load previous subdomains for change detection
@@ -846,32 +1011,25 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         previous_subdomains.add(t["domain"])
 
     try:
-        # --- Etapa 2: Subdomain enumeration (subfinder + crt.sh) ---
-        logger.info("[RECON] [2/12] Subdomain enum: subfinder + crt.sh para %d dominio(s)...", len(root_domains))
+        # --- Etapa 2: Subdomain enumeration (7 sources in parallel) ---
+        logger.info("[RECON] [2/14] Subdomain enum: 7 fontes para %d dominio(s)...", len(root_domains))
         t0 = time.time()
         all_subdomains: set[str] = set()
         for domain in root_domains:
-            subs_subfinder = run_subdomain_enum(domain)
-            subs_crtsh = run_crtsh_enum(domain)
-
-            combined = set(subs_subfinder) | set(subs_crtsh)
-            only_crtsh = set(subs_crtsh) - set(subs_subfinder)
-
-            all_subdomains.update(combined)
+            subs = run_all_subdomain_sources(domain)
+            all_subdomains.update(subs)
             all_subdomains.add(domain)
-            logger.info("[RECON]        %s → subfinder=%d | crt.sh=%d | exclusivos_crtsh=%d | total=%d",
-                        domain, len(subs_subfinder), len(subs_crtsh), len(only_crtsh), len(combined))
-        logger.info("[RECON] [2/12] Enum completa: %d subdominios em %.1fs",
+        logger.info("[RECON] [2/14] Enum completa: %d subdominios unicos em %.1fs",
                      len(all_subdomains), time.time() - t0)
 
         # --- Etapa 3: Scope filter ---
         scoped = [s for s in all_subdomains if is_in_scope(s, in_scope, out_of_scope)]
         removed = len(all_subdomains) - len(scoped)
-        logger.info("[RECON] [3/12] Filtro escopo: %d em escopo, %d removidos (out-of-scope)",
+        logger.info("[RECON] [3/14] Filtro escopo: %d em escopo, %d removidos (out-of-scope)",
                      len(scoped), removed)
 
         # --- Etapa 4: DNS resolve ---
-        logger.info("[RECON] [4/12] DNS: resolvendo %d subdominios...", len(scoped))
+        logger.info("[RECON] [4/14] DNS: resolvendo %d subdominios...", len(scoped))
         t0 = time.time()
         dns_map = resolve_dns(scoped)
         resolved_hosts = list(dns_map.keys())
@@ -879,51 +1037,51 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         for ips in dns_map.values():
             all_resolved_ips.extend(ips)
         unique_ips = list(set(all_resolved_ips))
-        logger.info("[RECON] [4/12] DNS completo: %d/%d resolvidos (%d IPs unicos) em %.1fs",
+        logger.info("[RECON] [4/14] DNS completo: %d/%d resolvidos (%d IPs unicos) em %.1fs",
                      len(resolved_hosts), len(scoped), len(unique_ips), time.time() - t0)
 
         # --- Etapa 5: ASN discovery ---
-        logger.info("[RECON] [5/12] ASN discovery: analisando %d IPs...", len(unique_ips))
+        logger.info("[RECON] [5/14] ASN discovery: analisando %d IPs...", len(unique_ips))
         t0 = time.time()
         asn_result = discover_target_asns(unique_ips)
         asn_count = len(asn_result.get("asns", {}))
         prefix_count = asn_result.get("total_prefixes", 0)
-        logger.info("[RECON] [5/12] ASN completo: %d ASNs, %d prefixos em %.1fs",
+        logger.info("[RECON] [5/14] ASN completo: %d ASNs, %d prefixos em %.1fs",
                      asn_count, prefix_count, time.time() - t0)
 
         # --- Etapa 6: Reverse DNS sweep ---
-        logger.info("[RECON] [6/12] Reverse DNS: %d IPs...", len(unique_ips))
+        logger.info("[RECON] [6/14] Reverse DNS: %d IPs...", len(unique_ips))
         t0 = time.time()
         rdns_results = reverse_dns_sweep(unique_ips)
         rdns_new_subs: set[str] = set()
         for ip, hostname in rdns_results.items():
             if hostname not in all_subdomains and is_in_scope(hostname, in_scope, out_of_scope):
                 rdns_new_subs.add(hostname)
-        logger.info("[RECON] [6/12] Reverse DNS: %d PTRs, %d novos em escopo em %.1fs",
+        logger.info("[RECON] [6/14] Reverse DNS: %d PTRs, %d novos em escopo em %.1fs",
                      len(rdns_results), len(rdns_new_subs), time.time() - t0)
 
         # --- Etapa 7: Second scope filter + merge reverse DNS discoveries ---
         if rdns_new_subs:
-            logger.info("[RECON] [7/12] Merge: adicionando %d subdomínios do reverse DNS", len(rdns_new_subs))
+            logger.info("[RECON] [7/14] Merge: adicionando %d subdomínios do reverse DNS", len(rdns_new_subs))
             rdns_dns = resolve_dns(sorted(rdns_new_subs))
             dns_map.update(rdns_dns)
             scoped = list(set(scoped) | rdns_new_subs)
             all_subdomains.update(rdns_new_subs)
             resolved_hosts = list(dns_map.keys())
         else:
-            logger.info("[RECON] [7/12] Merge: nenhum subdomínio novo do reverse DNS")
+            logger.info("[RECON] [7/14] Merge: nenhum subdomínio novo do reverse DNS")
 
         # --- Etapa 8: httpx probe ---
-        logger.info("[RECON] [8/12] httpx: verificando %d hosts vivos...", len(resolved_hosts))
+        logger.info("[RECON] [8/14] httpx: verificando %d hosts vivos...", len(resolved_hosts))
         t0 = time.time()
         alive_results = run_httpx_probe(resolved_hosts)
         alive_hosts = {a["host"] for a in alive_results}
         httpx_by_host = {a.get("host", ""): a for a in alive_results if a.get("host")}
-        logger.info("[RECON] [8/12] httpx completo: %d/%d vivos em %.1fs",
+        logger.info("[RECON] [8/14] httpx completo: %d/%d vivos em %.1fs",
                      len(alive_hosts), len(resolved_hosts), time.time() - t0)
 
         # --- Etapa 9: Security checks ---
-        logger.info("[RECON] [9/12] Security checks: analisando %d hosts vivos...", len(httpx_by_host))
+        logger.info("[RECON] [9/14] Security checks: analisando %d hosts vivos...", len(httpx_by_host))
         t0 = time.time()
         recon_checks_by_host = {}
         for i, (host, data) in enumerate(httpx_by_host.items(), 1):
@@ -935,13 +1093,13 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                             i, len(httpx_by_host), host, findings, high)
         total_findings = sum(v.get("total_findings", 0) for v in recon_checks_by_host.values())
         total_high = sum(v.get("high", 0) for v in recon_checks_by_host.values())
-        logger.info("[RECON] [9/12] Security checks completo: %d achados (%d HIGH) em %.1fs",
+        logger.info("[RECON] [9/14] Security checks completo: %d achados (%d HIGH) em %.1fs",
                      total_findings, total_high, time.time() - t0)
 
         # --- Etapa 10: HTTP Port Scanner (opcional) ---
         http_scanner_by_host: dict[str, Any] = {}
         if HTTP_PORT_SCANNER_ENABLED and alive_hosts:
-            logger.info("[RECON] [10/12] HTTP Port Scanner: %d hosts...", len(alive_hosts))
+            logger.info("[RECON] [10/14] HTTP Port Scanner: %d hosts...", len(alive_hosts))
             t0 = time.time()
             for host in sorted(alive_hosts):
                 try:
@@ -951,10 +1109,10 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                     extra = []
                 if extra:
                     http_scanner_by_host[host] = extra
-            logger.info("[RECON] [10/12] Port Scanner completo: %d hosts com portas extras em %.1fs",
+            logger.info("[RECON] [10/14] Port Scanner completo: %d hosts com portas extras em %.1fs",
                          len(http_scanner_by_host), time.time() - t0)
         else:
-            logger.info("[RECON] [10/12] HTTP Port Scanner: desabilitado ou sem hosts")
+            logger.info("[RECON] [10/14] HTTP Port Scanner: desabilitado ou sem hosts")
 
         # --- Etapa 11: Wayback Machine ---
         logger.info("[RECON] [11/14] Wayback Machine: buscando URLs historicas...")
