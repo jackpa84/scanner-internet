@@ -490,34 +490,242 @@ def _recon_security_checks(url: str, httpx_data: dict[str, Any] | None = None) -
             _add_recon_finding(result, sev, code, label, marker)
             break
 
-    for path, code, label in [
-        ("/.git/HEAD", "git_head_exposed", "Repositorio .git exposto"),
-        ("/server-status", "server_status_exposed", "Endpoint /server-status acessivel"),
-        ("/actuator/health", "actuator_health_exposed", "Endpoint actuator health exposto"),
-    ]:
+    # --- Sensitive file/path probes ---
+    sensitive_probes = [
+        ("/.git/HEAD", "git_head_exposed", "Repositorio .git exposto",
+         "high", lambda s, b: s == 200 and "refs/heads" in b),
+        ("/.git/config", "git_config_exposed", "Arquivo .git/config exposto",
+         "high", lambda s, b: s == 200 and "[core]" in b),
+        ("/.env", "env_file_exposed", "Arquivo .env exposto",
+         "high", lambda s, b: s == 200 and ("DB_" in b or "API_" in b or "SECRET" in b or "PASSWORD" in b or "KEY=" in b)),
+        ("/.DS_Store", "ds_store_exposed", "Arquivo .DS_Store exposto",
+         "medium", lambda s, b: s == 200 and "\x00\x00\x00\x01Bud1" in b),
+        ("/server-status", "server_status_exposed", "Apache /server-status acessivel",
+         "medium", lambda s, b: s == 200 and ("apache" in b or "server" in b)),
+        ("/actuator/health", "actuator_health_exposed", "Spring Actuator health exposto",
+         "medium", lambda s, b: s == 200 and '"status"' in b),
+        ("/actuator/env", "actuator_env_exposed", "Spring Actuator env exposto (secrets)",
+         "high", lambda s, b: s == 200 and '"property"' in b),
+        ("/actuator/configprops", "actuator_configprops", "Spring Actuator configprops exposto",
+         "high", lambda s, b: s == 200 and '"beans"' in b),
+        ("/wp-login.php", "wordpress_login", "Painel WordPress exposto",
+         "medium", lambda s, b: s == 200 and "wp-login" in b),
+        ("/wp-json/wp/v2/users", "wordpress_users_enum", "WordPress user enumeration",
+         "high", lambda s, b: s == 200 and '"slug"' in b and '"name"' in b),
+        ("/phpinfo.php", "phpinfo_exposed", "phpinfo() exposto",
+         "high", lambda s, b: s == 200 and "php version" in b.lower()),
+        ("/debug", "debug_endpoint", "Endpoint /debug acessivel",
+         "medium", lambda s, b: s == 200 and len(b) > 100),
+        ("/elmah.axd", "elmah_exposed", "ELMAH error log exposto (.NET)",
+         "high", lambda s, b: s == 200 and ("elmah" in b.lower() or "error log" in b.lower())),
+        ("/swagger-ui.html", "swagger_exposed", "Swagger UI exposto",
+         "medium", lambda s, b: s == 200 and "swagger" in b.lower()),
+        ("/api/swagger.json", "swagger_json_exposed", "Swagger JSON exposto",
+         "medium", lambda s, b: s == 200 and '"paths"' in b),
+        ("/graphql", "graphql_exposed", "Endpoint GraphQL exposto",
+         "medium", lambda s, b: s in (200, 400) and ("graphql" in b.lower() or '"errors"' in b)),
+        ("/.well-known/openid-configuration", "openid_config", "OpenID config exposto",
+         "low", lambda s, b: s == 200 and '"issuer"' in b),
+        ("/crossdomain.xml", "crossdomain_permissive", "crossdomain.xml permissivo",
+         "medium", lambda s, b: s == 200 and 'allow-access-from domain="*"' in b),
+        ("/clientaccesspolicy.xml", "clientaccess_permissive", "clientaccesspolicy.xml permissivo",
+         "medium", lambda s, b: s == 200 and 'allow-from http-request-headers="*"' in b),
+        ("/robots.txt", "robots_interesting", "robots.txt com paths sensiveis",
+         "low", lambda s, b: s == 200 and any(kw in b.lower() for kw in ["admin", "secret", "private", "internal", "api/v", "dashboard", "backup"])),
+    ]
+
+    for path, code, label, sev, check_fn in sensitive_probes:
         probe_url = _with_path(resp.url, path)
         try:
             p = requests.get(probe_url, timeout=4, allow_redirects=False, headers=headers)
-            body_small = (p.text or "")[:300].lower()
-            if code == "git_head_exposed" and p.status_code == 200 and "refs/heads" in body_small:
-                _add_recon_finding(result, "high", code, label, probe_url)
-            elif code == "server_status_exposed" and p.status_code == 200:
-                _add_recon_finding(result, "medium", code, label, probe_url)
-            elif code == "actuator_health_exposed" and p.status_code == 200 and re.search(r'"status"\s*:\s*"up"', body_small):
-                _add_recon_finding(result, "medium", code, label, probe_url)
+            body_small = (p.text or "")[:500]
+            if check_fn(p.status_code, body_small):
+                _add_recon_finding(result, sev, code, label, probe_url)
         except requests.RequestException:
             continue
 
+    # --- Subdomain takeover indicators ---
+    if resp.status_code in (404, 0):
+        takeover_sigs = [
+            "There isn't a GitHub Pages site here",
+            "herokucdn.com/error-pages",
+            "NoSuchBucket",
+            "The specified bucket does not exist",
+            "Domain is not configured",
+            "The feed has been deleted",
+            "project not found",
+            "Sorry, this shop is currently unavailable",
+            "Do you want to register",
+            "Help Center Closed",
+            "Fastly error: unknown domain",
+            "is not a registered InCloud YouTrack",
+            "No settings were found for this company",
+            "InvalidBucketName",
+            "This UserVoice subdomain is currently available",
+        ]
+        for sig in takeover_sigs:
+            if sig.lower() in body.lower():
+                _add_recon_finding(result, "high", "subdomain_takeover",
+                                   "Possivel subdomain takeover", sig)
+                break
+
+    # --- Open redirect probe ---
+    redir_url = _with_path(resp.url, "/redirect?url=https://evil.com")
+    try:
+        rr = requests.get(redir_url, timeout=4, allow_redirects=False, headers=headers)
+        loc = rr.headers.get("Location", "")
+        if "evil.com" in loc:
+            _add_recon_finding(result, "high", "open_redirect",
+                               "Open redirect detectado", f"{redir_url} → {loc}")
+    except requests.RequestException:
+        pass
+
+    # --- CORS reflected origin ---
+    try:
+        cors_headers = {**headers, "Origin": "https://evil.com"}
+        cr = requests.get(resp.url, timeout=4, headers=cors_headers)
+        acao_val = cr.headers.get("Access-Control-Allow-Origin", "")
+        if "evil.com" in acao_val:
+            acac_val = cr.headers.get("Access-Control-Allow-Credentials", "")
+            sev = "high" if acac_val.lower() == "true" else "medium"
+            _add_recon_finding(result, sev, "cors_reflected_origin",
+                               "CORS reflete origin arbitrario",
+                               f"Origin evil.com → ACAO={acao_val} ACAC={acac_val}")
+    except requests.RequestException:
+        pass
+
+    # --- TRACE method ---
     try:
         opt = requests.options(resp.url, timeout=4, allow_redirects=False, headers=headers)
         allow_hdr = str(opt.headers.get("Allow", ""))
         if "TRACE" in allow_hdr.upper():
-            _add_recon_finding(result, "medium", "trace_enabled", "Metodo TRACE habilitado", allow_hdr)
+            _add_recon_finding(result, "medium", "trace_enabled",
+                               "Metodo TRACE habilitado", allow_hdr)
     except requests.RequestException:
         pass
 
+    # --- JS files: extract secrets and internal URLs ---
+    js_secrets = _extract_js_secrets(resp.url, body, headers)
+    for secret in js_secrets:
+        _add_recon_finding(result, secret["severity"], secret["code"],
+                           secret["title"], secret["evidence"])
+
     result["total_findings"] = len(result["findings"])
     return result
+
+
+def _extract_js_secrets(base_url: str, html: str, headers: dict) -> list[dict[str, str]]:
+    """Extract secrets and interesting patterns from linked JS files."""
+    findings: list[dict[str, str]] = []
+
+    js_urls: set[str] = set()
+    for match in re.finditer(r'src=["\']([^"\']*\.js(?:\?[^"\']*)?)["\']', html):
+        src = match.group(1)
+        if src.startswith("//"):
+            src = "https:" + src
+        elif src.startswith("/"):
+            src = _with_path(base_url, src)
+        elif not src.startswith("http"):
+            continue
+        js_urls.add(src)
+
+    secret_patterns = [
+        (r'(?:api[_-]?key|apikey)\s*[:=]\s*["\']([a-zA-Z0-9_\-]{20,})["\']',
+         "high", "js_api_key", "API key exposta em JS"),
+        (r'(?:secret|token|password|passwd|pwd)\s*[:=]\s*["\']([^"\']{8,})["\']',
+         "high", "js_secret_token", "Secret/token exposto em JS"),
+        (r'(?:aws_access_key_id|AKIA)\s*[:=]?\s*["\']?(AKIA[A-Z0-9]{16})',
+         "high", "js_aws_key", "AWS Access Key exposta em JS"),
+        (r'(?:firebase|supabase|mongodb\+srv)://[^\s"\'<]{10,}',
+         "high", "js_db_url", "URL de banco exposta em JS"),
+        (r'(?:https?://[a-z0-9.-]+/(?:api/v[0-9]|internal|admin|private)[^\s"\'<]*)',
+         "medium", "js_internal_url", "URL interna/API encontrada em JS"),
+    ]
+
+    for js_url in list(js_urls)[:5]:
+        try:
+            jr = requests.get(js_url, timeout=5, headers=headers)
+            if jr.status_code != 200 or len(jr.text) > 2_000_000:
+                continue
+            js_body = jr.text[:500_000]
+            for pattern, sev, code, title in secret_patterns:
+                for m in re.finditer(pattern, js_body, re.IGNORECASE):
+                    evidence = f"{js_url} → {m.group(0)[:100]}"
+                    if not any(f["evidence"] == evidence for f in findings):
+                        findings.append({
+                            "severity": sev,
+                            "code": code,
+                            "title": title,
+                            "evidence": evidence,
+                        })
+                    break
+        except requests.RequestException:
+            continue
+
+    return findings[:10]
+
+
+# ---------------------------------------------------------------------------
+# Wayback Machine — URLs históricas para descobrir endpoints esquecidos
+# ---------------------------------------------------------------------------
+def run_wayback_enum(domain: str) -> list[str]:
+    """Query Wayback Machine CDX API for historical URLs of a domain."""
+    urls: set[str] = set()
+    try:
+        cdx_url = "https://web.archive.org/cdx/search/cdx"
+        params = {
+            "url": f"*.{domain}/*",
+            "output": "json",
+            "fl": "original",
+            "collapse": "urlkey",
+            "limit": "500",
+            "filter": "statuscode:200",
+        }
+        resp = requests.get(cdx_url, params=params, timeout=30)
+        if resp.status_code != 200:
+            return []
+        rows = resp.json()
+        for row in rows[1:]:
+            if row and row[0]:
+                url = row[0]
+                if any(ext in url.lower() for ext in [
+                    ".js", ".json", ".xml", ".conf", ".env", ".bak",
+                    ".sql", ".log", ".yml", ".yaml", ".toml", ".php",
+                    "/api/", "/admin", "/debug", "/internal", "/config",
+                    "/backup", "/secret", "/private", "/swagger",
+                ]):
+                    urls.add(url)
+        logger.info("[BOUNTY] Wayback %s: %d URLs interessantes", domain, len(urls))
+    except Exception as e:
+        logger.warning("[BOUNTY] Wayback erro para %s: %s", domain, e)
+    return sorted(urls)[:100]
+
+
+# ---------------------------------------------------------------------------
+# Auto-queue bounty targets for Nuclei scan
+# ---------------------------------------------------------------------------
+def _auto_queue_bounty_targets_for_nuclei() -> int:
+    """Enqueue alive bounty targets with findings for Nuclei/Nmap scan."""
+    try:
+        from app.vuln_scanner import enqueue_bounty_target
+    except ImportError:
+        return 0
+
+    targets_col = get_bounty_targets()
+    queued = 0
+    for t in targets_col.find(
+        {"alive": True, "recon_checks.risk_score": {"$gte": 25}},
+        {"domain": 1, "ips": 1, "httpx": 1},
+    ).limit(50):
+        domain = t.get("domain", "")
+        ips = t.get("ips", [])
+        httpx_data = t.get("httpx", {})
+        if enqueue_bounty_target(domain, ips, httpx_data):
+            queued += 1
+
+    if queued:
+        logger.info("[BOUNTY] Auto-queued %d bounty targets para Nuclei", queued)
+    return queued
 
 
 # ---------------------------------------------------------------------------
@@ -748,12 +956,24 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         else:
             logger.info("[RECON] [10/12] HTTP Port Scanner: desabilitado ou sem hosts")
 
-        # --- Etapa 11: Change detection ---
-        logger.info("[RECON] [11/12] Change detection...")
+        # --- Etapa 11: Wayback Machine ---
+        logger.info("[RECON] [11/14] Wayback Machine: buscando URLs historicas...")
+        t0 = time.time()
+        wayback_urls: dict[str, list[str]] = {}
+        for domain in root_domains[:3]:
+            wb = run_wayback_enum(domain)
+            if wb:
+                wayback_urls[domain] = wb
+        total_wb = sum(len(v) for v in wayback_urls.values())
+        logger.info("[RECON] [11/14] Wayback completo: %d URLs interessantes em %.1fs",
+                     total_wb, time.time() - t0)
+
+        # --- Etapa 12: Change detection ---
+        logger.info("[RECON] [12/14] Change detection...")
         changes = _detect_and_save_changes(oid, prog_name, set(scoped), previous_subdomains)
 
-        # --- Etapa 12: Save to MongoDB ---
-        logger.info("[RECON] [12/12] Salvando %d targets no MongoDB...", len(scoped))
+        # --- Etapa 13: Save to MongoDB ---
+        logger.info("[RECON] [13/14] Salvando %d targets no MongoDB...", len(scoped))
         t0 = time.time()
         now = datetime.utcnow()
         saved = 0
@@ -764,6 +984,12 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             recon_checks = recon_checks_by_host.get(sub, {"checked": False, "total_findings": 0, "findings": []})
             http_scanner = http_scanner_by_host.get(sub, [])
             is_new = sub in changes.get("new_subdomains", [])
+
+            wb_for_sub = []
+            for d, urls in wayback_urls.items():
+                if sub.endswith(d) or sub == d:
+                    wb_for_sub = urls
+                    break
 
             targets_col.update_one(
                 {"program_id": oid, "domain": sub},
@@ -777,6 +1003,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                         "httpx": httpx_data or {},
                         "recon_checks": recon_checks,
                         "http_scanner": http_scanner,
+                        "wayback_urls": wb_for_sub[:20],
                         "is_new": is_new,
                         "last_recon": now,
                     }
@@ -784,7 +1011,12 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                 upsert=True,
             )
             saved += 1
-        logger.info("[RECON] [12/12] MongoDB: %d targets salvos em %.1fs", saved, time.time() - t0)
+        logger.info("[RECON] [13/14] MongoDB: %d targets salvos em %.1fs", saved, time.time() - t0)
+
+        # --- Etapa 14: Auto-queue alive targets for Nuclei ---
+        logger.info("[RECON] [14/14] Nuclei auto-queue...")
+        nuclei_queued = _auto_queue_bounty_targets_for_nuclei()
+        logger.info("[RECON] [14/14] %d targets enfileirados para Nuclei", nuclei_queued)
 
         _inc_stat("subdomains_found", len(scoped))
         _inc_stat("hosts_alive", len(alive_hosts))
@@ -822,13 +1054,15 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             "org_prefixes": prefix_count,
             "crtsh_exclusive": sum(1 for s in scoped if s not in previous_subdomains),
             "rdns_discoveries": len(rdns_new_subs),
+            "wayback_urls": total_wb,
+            "nuclei_queued": nuclei_queued,
             "new_subdomains": changes.get("total_new", 0),
             "removed_subdomains": changes.get("total_removed", 0),
         }
         logger.info("[RECON] ========== FIM '%s' em %.1fs ==========", prog_name, elapsed)
-        logger.info("[RECON] Resumo: subs=%d | DNS=%d | vivos=%d | achados=%d (HIGH=%d) | ASNs=%d | novos=%d | salvos=%d",
+        logger.info("[RECON] Resumo: subs=%d | DNS=%d | vivos=%d | achados=%d (HIGH=%d) | ASNs=%d | novos=%d | wayback=%d | nuclei=%d | salvos=%d",
                      len(scoped), len(resolved_hosts), len(alive_hosts), total_findings, total_high,
-                     asn_count, changes.get("total_new", 0), saved)
+                     asn_count, changes.get("total_new", 0), total_wb, nuclei_queued, saved)
         return summary
     except Exception as e:
         _inc_stat("errors")
@@ -942,13 +1176,28 @@ def generate_report(program_id: str) -> str:
 # Auto recon loop
 # ---------------------------------------------------------------------------
 def _auto_recon_loop() -> None:
-    """Periodically re-run recon on active programs."""
+    """Periodically re-run recon on active programs.
+
+    Priority order:
+      1. Programs never scanned (no last_recon) — has_bounty first
+      2. Programs with oldest last_recon that exceeded interval
+    """
     logger.info("[BOUNTY] Auto-recon ativo (intervalo=%ds)", RECON_INTERVAL)
     while True:
         try:
             programs_col = get_bounty_programs()
-            active = programs_col.find({"status": {"$in": ["active", None]}})
-            for prog in active:
+
+            never_scanned = list(programs_col.find(
+                {"status": {"$in": ["active", None]}, "last_recon": {"$exists": False}},
+            ).sort("has_bounty", -1))
+
+            stale = list(programs_col.find(
+                {"status": {"$in": ["active", None]}, "last_recon": {"$exists": True}},
+            ).sort("last_recon", 1))
+
+            candidates = never_scanned + stale
+
+            for prog in candidates:
                 pid = str(prog["_id"])
                 last = prog.get("last_recon")
                 if last:
@@ -958,7 +1207,8 @@ def _auto_recon_loop() -> None:
                 try:
                     recon_pipeline(pid)
                 except Exception as e:
-                    logger.error("[BOUNTY] auto-recon erro em %s: %s", prog.get("name", "?"), e)
+                    logger.error("[BOUNTY] auto-recon erro em %s: %s",
+                                 prog.get("name", "?"), e)
                     _inc_stat("errors")
         except Exception as e:
             logger.error("[BOUNTY] auto-recon loop erro: %s", e)
