@@ -1,33 +1,9 @@
 services:
-  db:
-    image: mongo:7
-    container_name: scanner_db
-    command: ["mongod", "--bind_ip_all", "--wiredTigerCacheSizeGB", "1"]
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: user
-      MONGO_INITDB_ROOT_PASSWORD: password
-      MONGO_INITDB_DATABASE: scanner_db
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   app:
     build: .
     container_name: scanner_app
-    depends_on:
-      db:
-        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "5001:5000"
     cap_add:
@@ -38,16 +14,18 @@ services:
     environment:
       AUTH_USERNAME: "admin"
       AUTH_PASSWORD: "scanner2026"
-      MONGODB_URI: mongodb://user:password@db:27017/scanner_db?authSource=admin
+      MONGODB_URI: mongodb://admin:admin%40321@34.193.59.58:27017/admin?authSource=admin
       LOG_LEVEL: "INFO"
       NETWORK_SCANNER_ENABLED: "true"
       PYTHONUNBUFFERED: "1"
-      NUM_WORKERS: "50"
-      SCAN_INTERVAL: "0.05"
+      NUM_WORKERS: "250"
+      SCAN_INTERVAL: "0.01"
       SHODAN_RPS: "15"
-      IPAPI_RPS: "1.2"
-      IPINFO_RPS: "1.2"
-      PRESCAN_TIMEOUT: "0.5"
+      IPAPI_RPS: "1.5"
+      IPINFO_RPS: "1.5"
+      PRESCAN_TIMEOUT: "0.3"
+      BATCH_SIZE: "50"
+      BATCH_FLUSH_INTERVAL: "2.0"
       MASSCAN_ENABLED: "auto"
       MASSCAN_RATE: "50000"
       ABUSEIPDB_KEY: ""
@@ -63,9 +41,7 @@ services:
       BOUNTY_RECON_WORKERS: "2"
       SUBFINDER_TIMEOUT: "300"
       HTTPX_TIMEOUT: "300"
-      # Enviar reports ao HackerOne: token em .env (HACKERONE_API_TOKEN)
       HACKERONE_API_USERNAME: "jackpa"
-      # Integrações externas de bug bounty
       BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
       BUG_SCRAPER_ARGS: "--mode discovery --output json"
       HTTP_PORT_SCANNER_ENABLED: "true"
@@ -73,7 +49,16 @@ services:
     volumes:
       - ./app:/app/app
     restart: unless-stopped
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "debug"]
+    command: >
+      sh -c "
+        echo 'Aguardando MongoDB em 34.193.59.58:27017...' &&
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+          python -c \"import socket; s=socket.create_connection(('34.193.59.58',27017),5); s.close(); print('MongoDB OK')\" && break
+          echo \"Tentativa $$i falhou, aguardando 3s...\"
+          sleep 3
+        done &&
+        exec uvicorn app.main:app --host 0.0.0.0 --port 5000 --log-level debug
+      "
     logging:
       driver: "json-file"
       options:
@@ -103,5 +88,4 @@ services:
         max-file: "3"
 
 volumes:
-  mongo_data:
   frontend_node_modules:

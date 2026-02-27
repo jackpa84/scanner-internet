@@ -5,7 +5,7 @@ from pymongo import MongoClient
 from pymongo.database import Database
 from pymongo.collection import Collection
 
-MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://user:password@localhost:27017/scanner_db?authSource=admin")
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://admin:admin%40321@34.193.59.58:27017/admin?authSource=admin")
 logger = logging.getLogger("scanner.db")
 
 _client: MongoClient | None = None

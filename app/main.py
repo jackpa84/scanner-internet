@@ -390,10 +390,12 @@ def _scope_suggest_hackerone(program_url: str) -> dict:
     out_scope: list[str] = []
     source = "fallback"
 
-    # Try public HackerOne API first; if blocked/unavailable, fallback to HTML parsing.
     api_url = f"https://api.hackerone.com/v1/hackers/programs/{handle}"
+    h1_user = (os.getenv("HACKERONE_API_USERNAME") or "").strip()
+    h1_token = (os.getenv("HACKERONE_API_TOKEN") or "").strip()
+    h1_auth = (h1_user, h1_token) if h1_user and h1_token else None
     try:
-        resp = requests.get(api_url, timeout=12)
+        resp = requests.get(api_url, auth=h1_auth, timeout=12)
         if resp.ok:
             data = resp.json()
             rel = ((data or {}).get("relationships") or {}).get("structured_scopes") or {}
@@ -868,6 +870,37 @@ def api_bounty_submit_hackerone(program_id: str, body: dict | None = None):
     report_id = (data.get("data") or {}).get("id")
     report_url = attrs.get("url") or (f"https://hackerone.com/reports/{report_id}" if report_id else "")
     return {"report_id": report_id, "url": report_url, "ok": True}
+
+
+@app.get("/api/hackerone/me")
+def api_hackerone_me():
+    """Test HackerOne API credentials. Returns the authenticated user profile."""
+    username = (os.getenv("HACKERONE_API_USERNAME") or "").strip()
+    token = (os.getenv("HACKERONE_API_TOKEN") or "").strip()
+    if not username or not token:
+        raise HTTPException(
+            status_code=503,
+            detail="HACKERONE_API_USERNAME and HACKERONE_API_TOKEN not configured in .env",
+        )
+    try:
+        r = requests.get(
+            "https://api.hackerone.com/v1/me",
+            auth=(username, token),
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Request failed: {e!s}")
+
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="Invalid HackerOne credentials (check HACKERONE_API_USERNAME and HACKERONE_API_TOKEN)")
+    if r.status_code == 403:
+        raise HTTPException(status_code=403, detail="Forbidden — your IP may be blocked or token lacks permissions")
+    if not r.ok:
+        raise HTTPException(status_code=r.status_code, detail=f"HackerOne returned {r.status_code}: {r.text[:300]}")
+
+    data = r.json() or {}
+    return {"ok": True, "user": data}
 
 
 @app.get("/api/bounty/stats")
