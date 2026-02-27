@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useEffect, useState, useCallback } from "react";
+import Modal from "@/components/Modal";
 import {
   fetchBountyPrograms,
   fetchBountyTargets,
@@ -11,7 +12,6 @@ import {
   suggestBountyScope,
   triggerBountyRecon,
   clearBountyProgramError,
-  submitBountyToHackerOne,
   triggerBountyTargetScan,
   deleteBountyProgram,
   fetchBountyReport,
@@ -45,20 +45,23 @@ const STATUS_COLORS: Record<string, string> = {
 
 function StatBox({ label, value }: { label: string; value: number | string }) {
   return (
-    <div className="rounded-xl bg-slate-800/60 border border-slate-700/50 px-3 py-2.5 sm:px-4 sm:py-3 text-center">
-      <div className="text-xl sm:text-2xl font-bold text-white tabular-nums">{value}</div>
-      <div className="text-[10px] sm:text-[11px] text-slate-400 uppercase tracking-wider mt-0.5">{label}</div>
+    <div className="rounded-xl bg-slate-800/60 border border-slate-700/50 px-5 py-4 sm:px-6 sm:py-5 text-center">
+      <div className="text-3xl sm:text-4xl font-bold text-white tabular-nums">{value}</div>
+      <div className="text-sm sm:text-base text-slate-400 uppercase tracking-wider mt-1.5">{label}</div>
     </div>
   );
 }
 
-/** HackerOne: botão só habilitado quando o report cumpre o mínimo (título, descrição, passos, impacto, PoC). */
-function targetFulfillsHackerOneRules(target: BountyTarget): boolean {
-  const findings = target.recon_checks?.findings ?? [];
-  if (findings.length === 0) return false;
-  const hasTitle = findings.some((f) => (f.title || "").trim().length > 0);
-  const hasEvidence = findings.some((f) => (f.evidence || "").trim().length > 0);
-  return hasTitle && (target.domain || "").trim().length > 0 && hasEvidence;
+function isHackerOneProgram(program: BountyProgram): boolean {
+  return program.platform === "hackerone" && (program.url || "").includes("hackerone.com");
+}
+
+function targetFulfillsHackerOneRules(t: BountyTarget): boolean {
+  return (
+    t.alive &&
+    !!t.recon_checks?.checked &&
+    (t.recon_checks?.total_findings ?? 0) > 0
+  );
 }
 
 const SEV_ORDER: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4, none: 5 };
@@ -90,6 +93,13 @@ const REMEDIATION_BY_CODE: Record<string, string> = {
   git_head_exposed: "Remover ou restringir acesso a /.git e desabilitar listagem em produção.",
   server_status_exposed: "Proteger ou remover endpoints de status/debug em produção.",
   actuator_health_exposed: "Restringir acesso a endpoints de actuator/health apenas a redes internas ou remover.",
+};
+
+type H1EligibleReport = {
+  program: BountyProgram;
+  target: BountyTarget;
+  severity: string;
+  findings: number;
 };
 
 /** Gera report automaticamente a partir de programa, target e recon checks (.cursor/rules/bounty-reports.mdc). */
@@ -198,8 +208,6 @@ export default function BountyPanel() {
   const [reconning, setReconning] = useState<Set<string>>(new Set());
   const [scanningTargets, setScanningTargets] = useState<Set<string>>(new Set());
   const [reportLoading, setReportLoading] = useState<string | null>(null);
-  const [submitHackerOneLoading, setSubmitHackerOneLoading] = useState<string | null>(null);
-  const [submitTargetToH1Loading, setSubmitTargetToH1Loading] = useState<string | null>(null);
   const [copiedTemplateId, setCopiedTemplateId] = useState<string | null>(null);
   const [templatePreview, setTemplatePreview] = useState<string | null>(null);
   const [flowByProgram, setFlowByProgram] = useState<Record<string, BountyProgramFlow>>({});
@@ -217,6 +225,12 @@ export default function BountyPanel() {
   const [reconAllProgress, setReconAllProgress] = useState<{ done: number; total: number } | null>(null);
   const [changes, setChanges] = useState<BountyChange[]>([]);
   const [changesLoading, setChangesLoading] = useState(false);
+  const [h1EligibleReports, setH1EligibleReports] = useState<H1EligibleReport[]>([]);
+  const [h1EligibleLoading, setH1EligibleLoading] = useState(false);
+  const [detailProgram, setDetailProgram] = useState<BountyProgram | null>(null);
+  const [detailTarget, setDetailTarget] = useState<BountyTarget | null>(null);
+  const [showProgramList, setShowProgramList] = useState(false);
+  const [programSearch, setProgramSearch] = useState("");
 
   const handleBugScraperSync = async () => {
     try {
@@ -270,8 +284,10 @@ export default function BountyPanel() {
   const loadPrograms = useCallback(async () => {
     try {
       const [p, s] = await Promise.all([fetchBountyPrograms(), fetchBountyStats()]);
-      const list = Array.isArray(p) ? p : [];
-      const inError = list.filter((prog) => prog.status === "error");
+      const firstList = Array.isArray(p) ? p : [];
+      const inError = firstList.filter((prog) => prog.status === "error");
+      let finalList = firstList;
+      let finalStats = s;
       if (inError.length > 0) {
         for (const prog of inError) {
           try {
@@ -281,14 +297,48 @@ export default function BountyPanel() {
           }
         }
         const [p2, s2] = await Promise.all([fetchBountyPrograms(), fetchBountyStats()]);
-        setPrograms(Array.isArray(p2) ? p2 : []);
-        setStats(s2);
-      } else {
-        setPrograms(list);
-        setStats(s);
+        finalList = Array.isArray(p2) ? p2 : [];
+        finalStats = s2;
       }
+
+      setPrograms(finalList);
+      setStats(finalStats);
+
+      const h1Programs = finalList.filter(
+        (prog) => prog.platform === "hackerone" && (prog.url || "").includes("hackerone.com")
+      );
+      if (h1Programs.length === 0) {
+        setH1EligibleReports([]);
+        return;
+      }
+
+      setH1EligibleLoading(true);
+      const byProgram = await Promise.all(
+        h1Programs.map(async (prog) => {
+          try {
+            const programTargets = await fetchBountyTargets(prog.id);
+            return (Array.isArray(programTargets) ? programTargets : [])
+              .filter(targetFulfillsHackerOneRules)
+              .map((target) => ({
+                program: prog,
+                target,
+                severity: maxSeverity(target.recon_checks?.findings ?? []),
+                findings: target.recon_checks?.total_findings ?? 0,
+              }));
+          } catch {
+            return [] as H1EligibleReport[];
+          }
+        })
+      );
+      const sevRank: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+      const flattened = byProgram
+        .flat()
+        .sort((a, b) => (sevRank[a.severity] ?? 99) - (sevRank[b.severity] ?? 99) || b.findings - a.findings);
+      setH1EligibleReports(flattened);
     } catch (e) {
       console.error("BountyPanel load error:", e);
+    } finally {
+      setH1EligibleLoading(false);
     }
   }, []);
 
@@ -572,24 +622,6 @@ export default function BountyPanel() {
     }
   };
 
-  const handleSubmitHackerOne = async (programId: string) => {
-    setSubmitHackerOneLoading(programId);
-    try {
-      const res = await submitBountyToHackerOne(programId);
-      if (res.url) {
-        window.open(res.url, "_blank", "noopener,noreferrer");
-        alert("Report enviado ao HackerOne. Abrindo o report em nova aba.");
-      } else {
-        alert("Report enviado ao HackerOne.");
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`Falha ao enviar ao HackerOne: ${msg}\n\nConfigure HACKERONE_API_USERNAME e HACKERONE_API_TOKEN no backend.`);
-    } finally {
-      setSubmitHackerOneLoading(null);
-    }
-  };
-
   const handleCopyTemplate = async (program: BountyProgram, target: BountyTarget) => {
     const md = buildReportTemplate(program, target);
     setTemplatePreview(md);
@@ -599,33 +631,6 @@ export default function BountyPanel() {
       setTimeout(() => setCopiedTemplateId(null), 1600);
     } catch (e) {
       console.error("Copy template error:", e);
-    }
-  };
-
-  const handleSubmitTargetToHackerOne = async (program: BountyProgram, target: BountyTarget) => {
-    if (!(program.platform === "hackerone" && (program.url || "").includes("hackerone.com"))) return;
-    setSubmitTargetToH1Loading(target.id);
-    try {
-      const body = buildReportTemplate(program, target);
-      const titleLine = body.split("\n").find((l) => l.startsWith("# "));
-      const title = (titleLine?.replace(/^#\s*/, "") || `Report ${target.domain}`).slice(0, 250);
-      const severity = maxSeverity(target.recon_checks?.findings ?? []);
-      const res = await submitBountyToHackerOne(program.id, {
-        title,
-        vulnerability_information: body,
-        severity_rating: severity,
-      });
-      if (res.url) {
-        window.open(res.url, "_blank", "noopener,noreferrer");
-        alert("Report enviado ao HackerOne. Abrindo em nova aba.");
-      } else {
-        alert("Report enviado ao HackerOne.");
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      alert(`Falha ao enviar: ${msg}`);
-    } finally {
-      setSubmitTargetToH1Loading(null);
     }
   };
 
@@ -683,134 +688,140 @@ export default function BountyPanel() {
     URL.revokeObjectURL(url);
   };
 
-  return (
-    <div className="space-y-4">
-      {/* Stats */}
-      {stats && (
-        <div className="space-y-3">
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <StatBox label="Programas" value={stats.programs} />
-            <StatBox label="Targets" value={stats.targets} />
-            <StatBox label="Vivos" value={stats.alive_targets} />
-            <StatBox label="Recons OK" value={stats.recon?.recons_completed ?? 0} />
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {(stats.new_targets ?? 0) > 0 && (
-              <div className="rounded border border-emerald-500/30 bg-emerald-500/5 px-2 py-1 text-[11px]">
-                <span className="text-emerald-400 font-semibold">{stats.new_targets}</span>
-                <span className="text-slate-400 ml-1">Novos</span>
-              </div>
-            )}
-            {(stats.recon?.crtsh_subdomains ?? 0) > 0 && (
-              <div className="rounded border border-cyan-500/30 bg-cyan-500/5 px-2 py-1 text-[11px]">
-                <span className="text-cyan-400 font-semibold">{stats.recon.crtsh_subdomains}</span>
-                <span className="text-slate-400 ml-1">crt.sh</span>
-              </div>
-            )}
-            {(stats.recon?.asns_discovered ?? 0) > 0 && (
-              <div className="rounded border border-violet-500/30 bg-violet-500/5 px-2 py-1 text-[11px]">
-                <span className="text-violet-400 font-semibold">{stats.recon.asns_discovered}</span>
-                <span className="text-slate-400 ml-1">ASNs</span>
-              </div>
-            )}
-            {(stats.bounty_prefixes ?? 0) > 0 && (
-              <div className="rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px]">
-                <span className="text-amber-400 font-semibold">{stats.bounty_prefixes}</span>
-                <span className="text-slate-400 ml-1">Prefixos</span>
-              </div>
-            )}
-            {(stats.recon?.rdns_subdomains ?? 0) > 0 && (
-              <div className="rounded border border-pink-500/30 bg-pink-500/5 px-2 py-1 text-[11px]">
-                <span className="text-pink-400 font-semibold">{stats.recon.rdns_subdomains}</span>
-                <span className="text-slate-400 ml-1">rDNS</span>
-              </div>
-            )}
-            {(stats.recon?.new_subdomains_detected ?? 0) > 0 && (
-              <div className="rounded border border-lime-500/30 bg-lime-500/5 px-2 py-1 text-[11px]">
-                <span className="text-lime-400 font-semibold">{stats.recon.new_subdomains_detected}</span>
-                <span className="text-slate-400 ml-1">Novos subs</span>
-              </div>
-            )}
-            {(stats.total_changes ?? 0) > 0 && (
-              <div className="rounded border border-slate-600/50 bg-slate-800/40 px-2 py-1 text-[11px]">
-                <span className="text-slate-300 font-semibold">{stats.total_changes}</span>
-                <span className="text-slate-400 ml-1">Changes</span>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+  const h1Programs = programs.filter(isHackerOneProgram);
+  const listedPrograms = (filterFlowStep === "" ? programs : programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep))
+    .filter((p) => !isHackerOneProgram(p));
+  const allPrograms = (filterFlowStep === "" ? programs : programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep))
+    .slice()
+    .sort((a, b) => (b.vuln_count ?? 0) - (a.vuln_count ?? 0));
 
-      {/* Actions */}
-      <div className="rounded-xl border border-slate-800/80 bg-slate-900/40 px-3 py-2.5 sm:px-4 sm:py-3 space-y-2 sm:space-y-0">
-        {/* Row 1: Primary actions */}
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => { setShowForm(!showForm); setShowCsvImport(false); }}
-            className="rounded-lg bg-emerald-600 hover:bg-emerald-500 px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-semibold text-white shadow-sm transition"
-          >
-            {showForm ? "Cancelar" : "+ Novo"}
-          </button>
-          <button
-            onClick={() => { setShowCsvImport(!showCsvImport); setShowForm(false); }}
-            className="rounded-lg bg-slate-600 hover:bg-slate-500 px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-semibold text-white transition"
-          >
-            {showCsvImport ? "Fechar" : "CSV"}
-          </button>
-          {programs.length > 0 && (
-            <>
-              <button
-                type="button"
-                onClick={handleReconAll}
-                disabled={reconAllRunning || programs.length === 0}
-                className="rounded-lg bg-blue-600 hover:bg-blue-500 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 transition"
-              >
-                {reconAllRunning
-                  ? `${reconAllProgress?.done ?? 0}/${reconAllProgress?.total ?? 0}`
-                  : "Recon All"}
-              </button>
-              <button
-                type="button"
-                onClick={handleDeleteAllPrograms}
-                disabled={clearingAll}
-                className="rounded-lg bg-red-700/80 hover:bg-red-600 px-3 py-1.5 text-xs font-semibold text-red-50 disabled:opacity-50 transition"
-              >
-                {clearingAll ? "..." : "Limpar"}
-              </button>
-            </>
-          )}
-          <div className="ml-auto flex items-center gap-2">
-            <select
-              value={filterFlowStep}
-              onChange={(e) => setFilterFlowStep(e.target.value === "" ? "" : Number(e.target.value))}
-              className="rounded-lg bg-slate-950/70 border border-slate-700 px-2.5 py-1.5 text-xs sm:text-sm text-white focus:border-emerald-500 focus:outline-none"
-            >
-              <option value="">Todas</option>
-              {[1, 2, 3, 4, 5, 6, 7].map((n) => (
-                <option key={n} value={n}>Etapa {n}</option>
-              ))}
-            </select>
+  const filteredPrograms = programSearch.trim()
+    ? allPrograms.filter(p => p.name.toLowerCase().includes(programSearch.toLowerCase()) || (p.platform || "").toLowerCase().includes(programSearch.toLowerCase()))
+    : allPrograms;
+
+  return (
+    <div className="space-y-5">
+      {/* Programs — elegant button */}
+      <button
+        type="button"
+        onClick={() => { setShowProgramList(true); setProgramSearch(""); }}
+        className="w-full rounded-2xl border border-[var(--border)] bg-[var(--card)] p-6 text-left hover:border-[var(--accent)]/40 hover:bg-[var(--card-hover)] transition-all group"
+      >
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[var(--accent)]/10 text-[var(--accent-light)]">
+              <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-xl font-bold text-[var(--foreground)]">
+                {allPrograms.length} <span className="text-[var(--muted)] font-normal">Programas</span>
+              </div>
+              <div className="flex items-center gap-3 text-sm text-[var(--muted)] mt-0.5">
+                <span>{programs.filter(p => p.has_bounty).length} com bounty</span>
+                <span>{programs.filter(p => p.platform === "hackerone").length} HackerOne</span>
+                <span>{programs.filter(p => p.status === "reconning").length} reconning</span>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="text-base font-medium text-[var(--accent-light)] opacity-0 group-hover:opacity-100 transition-opacity">
+              Ver lista completa
+            </span>
+            <svg className="w-5 h-5 text-[var(--accent-light)] opacity-60 group-hover:opacity-100 transition-opacity" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
+            </svg>
           </div>
         </div>
-        {/* Row 2: Bug Scraper */}
-        <div className="flex items-center gap-2 text-xs">
-          <button
-            type="button"
-            onClick={handleBugScraperSync}
-            disabled={bugScraperLoading}
-            className="rounded-lg border border-slate-600/70 bg-slate-900/60 px-3 py-1.5 text-xs font-semibold text-slate-100 hover:border-emerald-500/60 hover:bg-slate-900 disabled:opacity-50 transition"
-          >
-            {bugScraperLoading ? "Sync..." : "Bug Scraper"}
-          </button>
-          {bugScraperInserted !== null && (
-            <span className="text-[11px] text-slate-400">
-              {bugScraperInserted > 0
-                ? `+${bugScraperInserted} programa(s)`
-                : "Nenhum novo"}
-            </span>
-          )}
+      </button>
+
+      {/* Programs List Modal */}
+      <Modal
+        open={showProgramList}
+        onClose={() => setShowProgramList(false)}
+        title={`Programas (${filteredPrograms.length})`}
+        maxWidth="max-w-4xl"
+      >
+        <div className="space-y-4">
+          {/* Search */}
+          <input
+            type="text"
+            value={programSearch}
+            onChange={(e) => setProgramSearch(e.target.value)}
+            placeholder="Buscar programa..."
+            className="w-full rounded-xl bg-[var(--background)] border border-[var(--border)] px-4 py-3 text-base text-[var(--foreground)] placeholder-[var(--muted)] focus:border-[var(--accent)] focus:outline-none"
+          />
+
+          {/* List */}
+          <div className="space-y-1.5 max-h-[65vh] overflow-y-auto hide-scrollbar">
+            {filteredPrograms.map((p) => {
+              const isReconRunning = p.status === "reconning" || reconning.has(p.id);
+              const isH1 = isHackerOneProgram(p);
+              const hasBounty = p.has_bounty === true;
+              const vulnCount = p.vuln_count ?? 0;
+
+              const statusDot =
+                p.status === "reconning" ? "bg-blue-400 animate-pulse" :
+                p.status === "error" ? "bg-red-400" :
+                "bg-emerald-400";
+
+              return (
+                <div
+                  key={p.id}
+                  className={`rounded-xl border p-4 flex items-center gap-4 hover:bg-[var(--card-hover)] transition-all ${
+                    isH1 ? "border-orange-500/20 bg-[var(--card)]" : "border-[var(--border)] bg-[var(--card)]"
+                  }`}
+                >
+                  <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${statusDot}`} />
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base font-bold text-[var(--foreground)] truncate">{p.name}</span>
+                      <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-semibold uppercase ${
+                        isH1 ? "bg-orange-500/15 text-orange-300" : "bg-purple-500/15 text-purple-300"
+                      }`}>{p.platform || "?"}</span>
+                      {hasBounty && <span className="shrink-0 rounded-full bg-green-500/15 text-green-300 px-2 py-0.5 text-xs font-semibold">$</span>}
+                    </div>
+                    <div className="flex items-center gap-3 text-sm text-[var(--muted)] mt-0.5">
+                      <span>{p.target_count ?? 0} targets</span>
+                      <span className="text-emerald-400">{p.alive_count ?? 0} vivos</span>
+                      {vulnCount > 0 && <span className="text-red-400">{vulnCount} vulns</span>}
+                      <span>etapa {p.flow_step ?? 1}/7</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={() => handleRecon(p.id)}
+                      disabled={isReconRunning}
+                      className="rounded-lg bg-blue-600 hover:bg-blue-500 disabled:opacity-40 px-3 py-1.5 text-sm font-semibold text-white transition"
+                    >
+                      {isReconRunning ? "..." : "Recon"}
+                    </button>
+                    <button
+                      onClick={() => { setShowProgramList(false); setDetailProgram(p); }}
+                      className="rounded-lg bg-[var(--accent)]/15 hover:bg-[var(--accent)]/25 px-3 py-1.5 text-sm font-semibold text-[var(--accent-light)] transition"
+                    >
+                      Detalhes
+                    </button>
+                    <button
+                      onClick={() => handleDelete(p.id)}
+                      className="rounded-lg bg-red-700/40 hover:bg-red-600 px-3 py-1.5 text-sm font-semibold text-red-300 transition"
+                    >
+                      Excluir
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {filteredPrograms.length === 0 && (
+              <p className="text-center text-base text-[var(--muted)] py-8">Nenhum programa encontrado</p>
+            )}
+          </div>
         </div>
-      </div>
+      </Modal>
+
 
       {/* CSV Import */}
       {showCsvImport && (
@@ -1078,21 +1089,23 @@ export default function BountyPanel() {
         </div>
       )}
 
-      {/* Program cards */}
-      {programs.length === 0 && !showForm && (
+      {/* (seção "Outros Programas" foi unificada na grade acima) */}
+
+      {/* Program cards (legado oculto) */}
+      {false && listedPrograms.length === 0 && !showForm && (
         <p className="text-center text-sm text-slate-500 py-6">
-          Nenhum programa cadastrado. Clique &quot;+ Novo&quot; para comecar.
+          Nenhum programa fora da HackerOne para listar.
         </p>
       )}
 
-      {filterFlowStep !== "" && programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep).length === 0 && programs.length > 0 && (
+      {false && filterFlowStep !== "" && listedPrograms.length === 0 && programs.length > 0 && (
         <p className="text-center text-sm text-slate-500 py-4">
-          Nenhum programa na etapa {filterFlowStep}.
+          Nenhum programa nao-H1 na etapa {filterFlowStep}.
         </p>
       )}
 
-      <div className="rounded-xl border border-slate-700/50 bg-slate-900/30 overflow-hidden divide-y divide-slate-800/60">
-        {(filterFlowStep === "" ? programs : programs.filter((p) => (p.flow_step ?? 1) === filterFlowStep))
+      <div className="hidden">
+        {listedPrograms
           .slice()
           .sort((a, b) => {
             const aHasRecon = a.last_recon ? 1 : 0;
@@ -1232,15 +1245,6 @@ export default function BountyPanel() {
                     >
                       {reportLoading === p.id ? "..." : "Report"}
                     </button>
-                    {isH1 && (
-                      <button
-                        onClick={() => handleSubmitHackerOne(p.id)}
-                        disabled={submitHackerOneLoading === p.id}
-                        className="rounded-lg bg-orange-600 hover:bg-orange-500 disabled:opacity-40 px-3 py-1.5 text-xs font-semibold text-white transition"
-                      >
-                        {submitHackerOneLoading === p.id ? "..." : "Enviar H1"}
-                      </button>
-                    )}
                     {(p.status === "error" || p.status === "reconning") && (
                       <button
                         onClick={() => handleClearError(p.id)}
@@ -1259,24 +1263,26 @@ export default function BountyPanel() {
 
                   {/* Flow HackerOne */}
                   {flowByProgram[p.id] && (
-                    <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3">
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Fluxo</span>
-                        <span className="text-[10px] font-medium text-emerald-300">Passo {flowByProgram[p.id].current_step}/7</span>
-                      </div>
-                      <div className="flex flex-wrap gap-1 text-[10px]">
-                        {flowByProgram[p.id].steps.map((s) => (
-                          <span
-                            key={s.n}
-                            className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 border ${
-                              s.done
-                                ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                                : "border-slate-700/70 text-slate-500"
-                            }`}
-                          >
-                            {s.done ? "✓" : s.n}
-                          </span>
-                        ))}
+                    <div className="space-y-3">
+                      <div className="rounded-lg border border-slate-700/70 bg-slate-900/60 p-3">
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Fluxo</span>
+                          <span className="text-[10px] font-medium text-emerald-300">Passo {flowByProgram[p.id].current_step}/7</span>
+                        </div>
+                        <div className="flex flex-wrap gap-1 text-[10px]">
+                          {flowByProgram[p.id].steps.map((s) => (
+                            <span
+                              key={s.n}
+                              className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 border ${
+                                s.done
+                                  ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+                                  : "border-slate-700/70 text-slate-500"
+                              }`}
+                            >
+                              {s.done ? "✓" : s.n}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   )}
@@ -1413,15 +1419,6 @@ export default function BountyPanel() {
                                 >
                                   {scanningTargets.has(t.id) ? "..." : "Scan"}
                                 </button>
-                                {isH1 && (
-                                  <button
-                                    onClick={() => handleSubmitTargetToHackerOne(p, t)}
-                                    disabled={submitTargetToH1Loading === t.id || !targetFulfillsHackerOneRules(t)}
-                                    className="rounded bg-orange-600 hover:bg-orange-500 disabled:opacity-40 px-2 py-0.5 text-[10px] font-semibold text-white transition"
-                                  >
-                                    {submitTargetToH1Loading === t.id ? "..." : "H1"}
-                                  </button>
-                                )}
                               </div>
                             </div>
                           </div>
@@ -1470,22 +1467,208 @@ export default function BountyPanel() {
             className="relative w-full max-h-[90vh] sm:max-h-[85vh] sm:max-w-2xl rounded-t-xl sm:rounded-xl border border-slate-600 bg-slate-900 shadow-xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-slate-700 px-3 py-2 sm:px-4">
-              <span className="text-sm font-semibold text-slate-200">Preview</span>
+            <div className="flex items-center justify-between border-b border-slate-700 px-5 py-4">
+              <span className="text-lg font-semibold text-slate-200">Preview</span>
               <button
                 type="button"
                 onClick={() => setTemplatePreview(null)}
-                className="rounded bg-slate-600 px-3 py-1 text-xs font-medium text-white hover:bg-slate-500"
+                className="rounded bg-slate-600 px-4 py-2 text-base font-medium text-white hover:bg-slate-500"
               >
                 Fechar
               </button>
             </div>
-            <pre className="max-h-[75vh] sm:max-h-[70vh] overflow-auto whitespace-pre-wrap p-3 sm:p-4 text-left text-xs text-slate-300">
+            <pre className="max-h-[75vh] sm:max-h-[70vh] overflow-auto whitespace-pre-wrap p-5 sm:p-6 text-left text-base text-slate-300">
               {templatePreview}
             </pre>
           </div>
         </div>
       )}
+
+      {/* Program Detail Modal */}
+      <Modal
+        open={!!detailProgram}
+        onClose={() => setDetailProgram(null)}
+        title={detailProgram ? `Programa: ${detailProgram.name}` : ""}
+        maxWidth="max-w-3xl"
+      >
+        {detailProgram && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className="text-3xl font-bold text-[var(--foreground)] tabular-nums">{detailProgram.target_count ?? 0}</div>
+                <div className="text-base text-[var(--muted)] mt-2">Targets</div>
+              </div>
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className="text-3xl font-bold text-emerald-400 tabular-nums">{detailProgram.alive_count ?? 0}</div>
+                <div className="text-base text-[var(--muted)] mt-2">Vivos</div>
+              </div>
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className="text-3xl font-bold text-red-400 tabular-nums">{detailProgram.vuln_count ?? 0}</div>
+                <div className="text-base text-[var(--muted)] mt-2">Vulns</div>
+              </div>
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className="text-3xl font-bold text-[var(--accent-light)] tabular-nums">{detailProgram.flow_step ?? 1}/7</div>
+                <div className="text-base text-[var(--muted)] mt-2">Etapa</div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="text-base text-[var(--muted)]">Plataforma:</span>
+                <span className="text-base font-semibold text-[var(--foreground)] uppercase">{detailProgram.platform || "N/A"}</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="text-base text-[var(--muted)]">Status:</span>
+                <span className="text-base font-semibold text-[var(--foreground)]">{detailProgram.status}</span>
+              </div>
+              {detailProgram.url && (
+                <div className="flex items-center gap-3">
+                  <span className="text-base text-[var(--muted)]">URL:</span>
+                  <a href={detailProgram.url} target="_blank" rel="noopener noreferrer" className="text-base text-[var(--accent-light)] hover:underline truncate">
+                    {detailProgram.url}
+                  </a>
+                </div>
+              )}
+              {detailProgram.has_bounty && (
+                <div className="flex items-center gap-3">
+                  <span className="text-base text-[var(--muted)]">Bounty:</span>
+                  <span className="text-base font-semibold text-green-400">
+                    {detailProgram.bounty_currency || "USD"} {detailProgram.bounty_min ?? "?"} - {detailProgram.bounty_max ?? "?"}
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {(detailProgram.in_scope ?? []).length > 0 && (
+              <div>
+                <h3 className="text-base font-semibold text-[var(--foreground)] mb-3">In-Scope</h3>
+                <div className="flex flex-wrap gap-2">
+                  {detailProgram.in_scope!.map((s: string, i: number) => (
+                    <code key={i} className="rounded bg-emerald-500/10 border border-emerald-500/20 px-3 py-1.5 text-base text-emerald-300">{s}</code>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {(detailProgram.out_of_scope ?? []).length > 0 && (
+              <div>
+                <h3 className="text-base font-semibold text-[var(--foreground)] mb-3">Out-of-Scope</h3>
+                <div className="flex flex-wrap gap-2">
+                  {detailProgram.out_of_scope!.map((s: string, i: number) => (
+                    <code key={i} className="rounded bg-red-500/10 border border-red-500/20 px-3 py-1.5 text-base text-red-300 line-through">{s}</code>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {detailProgram.last_recon && (
+              <div className="flex items-center gap-3">
+                <span className="text-base text-[var(--muted)]">Último recon:</span>
+                <span className="text-base text-[var(--foreground)]">{new Date(detailProgram.last_recon).toLocaleString("pt-BR")}</span>
+              </div>
+            )}
+
+            {detailProgram.last_recon_error && (
+              <div className="rounded-xl border border-red-500/30 bg-red-500/5 p-5">
+                <span className="text-base text-red-400">{detailProgram.last_recon_error}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
+
+      {/* Target Detail Modal */}
+      <Modal
+        open={!!detailTarget}
+        onClose={() => setDetailTarget(null)}
+        title={detailTarget ? `Target: ${detailTarget.domain}` : ""}
+        maxWidth="max-w-3xl"
+      >
+        {detailTarget && (
+          <div className="space-y-6">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-4">
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className={`text-3xl font-bold tabular-nums ${detailTarget.alive ? "text-emerald-400" : "text-red-400"}`}>
+                  {detailTarget.alive ? "Online" : "Offline"}
+                </div>
+                <div className="text-base text-[var(--muted)] mt-2">Status</div>
+              </div>
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className="text-3xl font-bold text-[var(--foreground)] tabular-nums">{detailTarget.httpx?.status_code ?? "-"}</div>
+                <div className="text-base text-[var(--muted)] mt-2">HTTP Status</div>
+              </div>
+              <div className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-5 text-center">
+                <div className="text-3xl font-bold text-amber-400 tabular-nums">{detailTarget.recon_checks?.total_findings ?? 0}</div>
+                <div className="text-base text-[var(--muted)] mt-2">Achados</div>
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="text-base text-[var(--muted)]">Domínio:</span>
+                <span className="text-base font-mono font-semibold text-[var(--foreground)]">{detailTarget.domain}</span>
+              </div>
+              {detailTarget.httpx?.url && (
+                <div className="flex items-center gap-3">
+                  <span className="text-base text-[var(--muted)]">URL:</span>
+                  <a href={detailTarget.httpx.url} target="_blank" rel="noopener noreferrer" className="text-base text-[var(--accent-light)] hover:underline">
+                    {detailTarget.httpx.url}
+                  </a>
+                </div>
+              )}
+              {(detailTarget.ips ?? []).length > 0 && (
+                <div className="flex items-center gap-3">
+                  <span className="text-base text-[var(--muted)]">IPs:</span>
+                  <span className="text-base font-mono text-[var(--foreground)]">{detailTarget.ips!.join(", ")}</span>
+                </div>
+              )}
+              {(detailTarget.httpx?.tech ?? []).length > 0 && (
+                <div className="flex items-start gap-3">
+                  <span className="text-base text-[var(--muted)] shrink-0">Tecnologias:</span>
+                  <div className="flex flex-wrap gap-2">
+                    {detailTarget.httpx!.tech!.map((tech, i) => (
+                      <span key={i} className="rounded bg-cyan-500/10 border border-cyan-500/20 px-3 py-1 text-base text-cyan-300">{tech}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {detailTarget.recon_checks?.risk_score != null && (
+                <div className="flex items-center gap-3">
+                  <span className="text-base text-[var(--muted)]">Risk Score:</span>
+                  <span className="text-base font-bold text-amber-400">{detailTarget.recon_checks.risk_score} pts</span>
+                </div>
+              )}
+            </div>
+
+            {(detailTarget.recon_checks?.findings ?? []).length > 0 && (
+              <div>
+                <h3 className="text-base font-semibold text-[var(--foreground)] mb-3">Findings</h3>
+                <div className="space-y-2.5">
+                  {detailTarget.recon_checks!.findings!.map((f, i) => (
+                    <div key={i} className="rounded-xl bg-[var(--background)] border border-[var(--border)] p-4">
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className="text-base font-semibold text-[var(--foreground)]">{f.title}</span>
+                        <span className={`rounded px-2.5 py-1 text-sm font-bold uppercase ${
+                          f.severity === "critical" ? "bg-red-500/20 text-red-300" :
+                          f.severity === "high" ? "bg-orange-500/20 text-orange-300" :
+                          f.severity === "medium" ? "bg-amber-500/20 text-amber-300" :
+                          f.severity === "low" ? "bg-sky-500/20 text-sky-300" :
+                          "bg-slate-500/20 text-slate-300"
+                        }`}>
+                          {f.severity}
+                        </span>
+                      </div>
+                      {f.evidence && (
+                        <p className="text-base text-[var(--muted)] break-all">{f.evidence}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

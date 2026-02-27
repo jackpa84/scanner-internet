@@ -7,8 +7,11 @@ RUN npm install --no-audit --no-fund
 
 COPY . .
 
-ARG NEXT_PUBLIC_API_URL=http://localhost:5001
+ARG NEXT_PUBLIC_API_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+
+ARG API_BACKEND_URL=http://app:5000
+ENV API_BACKEND_URL=$API_BACKEND_URL
 
 RUN npm run build
 

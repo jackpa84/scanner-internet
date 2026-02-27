@@ -1,21 +1,22 @@
 """
 Bug Bounty mode: gerenciamento de programas, recon automatizado e scope validation.
 
-Pipeline (14 etapas):
+Pipeline (17 etapas):
   1. Extract root domains
   2. Subdomain enum: 7 fontes paralelas (subfinder + crt.sh + AlienVault + HackerTarget + RapidDNS + Anubis + Wayback)
   3. Scope filter
-  4. DNS resolve
+  4. DNS resolve + DNS Zone Transfer check
   5. ASN discovery
   6. Reverse DNS
   7. Merge + second scope filter
   8. httpx probe
-  9. Security checks (28+ probes + JS analysis)
+  9. Security checks (40+ probes: headers, CORS, SSTI, CRLF, Host Header, JWT, S3 Bucket, JS analysis)
   10. HTTP port scanner (opcional)
-  11. Wayback Machine URLs
-  12. Change detection
-  13. Save to MongoDB
-  14. Nuclei auto-queue
+  11. Wayback Machine URLs + ParamSpider
+  12. GitHub Dorking
+  13. Change detection
+  14. Save to MongoDB
+  15. Nuclei auto-queue
 """
 
 import fnmatch
@@ -42,6 +43,12 @@ from app.ip_feeds import (
     discover_asn_for_ip,
     enumerate_asn_prefixes,
     register_bounty_prefixes,
+)
+from app.advanced_recon import (
+    run_advanced_http_checks,
+    check_dns_zone_transfer,
+    run_github_dorking,
+    run_paramspider,
 )
 
 logger = logging.getLogger("scanner.bounty")
@@ -788,6 +795,15 @@ def _recon_security_checks(url: str, httpx_data: dict[str, Any] | None = None) -
         _add_recon_finding(result, secret["severity"], secret["code"],
                            secret["title"], secret["evidence"])
 
+    # --- Advanced checks: SSTI, CRLF, Host Header, JWT, S3 Bucket ---
+    try:
+        domain = (urlsplit(resp.url).hostname or "").lower()
+        adv_findings = run_advanced_http_checks(resp.url, domain, resp, headers)
+        for f in adv_findings:
+            _add_recon_finding(result, f["severity"], f["code"], f["title"], f.get("evidence", ""))
+    except Exception:
+        pass
+
     result["total_findings"] = len(result["findings"])
     return result
 
@@ -1015,7 +1031,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
 
     prog_name = program.get("name", "?")
     logger.info("[RECON] ========== INICIO '%s' ==========", prog_name)
-    logger.info("[RECON] [1/14] Escopo: dominios=%s | in_scope=%s | out_of_scope=%s",
+    logger.info("[RECON] [1/15] Escopo: dominios=%s | in_scope=%s | out_of_scope=%s",
                 root_domains, in_scope[:5], out_of_scope[:5])
 
     # Load previous subdomains for change detection
@@ -1025,24 +1041,24 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
 
     try:
         # --- Etapa 2: Subdomain enumeration (7 sources in parallel) ---
-        logger.info("[RECON] [2/14] Subdomain enum: 7 fontes para %d dominio(s)...", len(root_domains))
+        logger.info("[RECON] [2/15] Subdomain enum: 7 fontes para %d dominio(s)...", len(root_domains))
         t0 = time.time()
         all_subdomains: set[str] = set()
         for domain in root_domains:
             subs = run_all_subdomain_sources(domain)
             all_subdomains.update(subs)
             all_subdomains.add(domain)
-        logger.info("[RECON] [2/14] Enum completa: %d subdominios unicos em %.1fs",
+        logger.info("[RECON] [2/15] Enum completa: %d subdominios unicos em %.1fs",
                      len(all_subdomains), time.time() - t0)
 
         # --- Etapa 3: Scope filter ---
         scoped = [s for s in all_subdomains if is_in_scope(s, in_scope, out_of_scope)]
         removed = len(all_subdomains) - len(scoped)
-        logger.info("[RECON] [3/14] Filtro escopo: %d em escopo, %d removidos (out-of-scope)",
+        logger.info("[RECON] [3/15] Filtro escopo: %d em escopo, %d removidos (out-of-scope)",
                      len(scoped), removed)
 
-        # --- Etapa 4: DNS resolve ---
-        logger.info("[RECON] [4/14] DNS: resolvendo %d subdominios...", len(scoped))
+        # --- Etapa 4: DNS resolve + Zone Transfer ---
+        logger.info("[RECON] [4/15] DNS: resolvendo %d subdominios...", len(scoped))
         t0 = time.time()
         dns_map = resolve_dns(scoped)
         resolved_hosts = list(dns_map.keys())
@@ -1050,51 +1066,62 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         for ips in dns_map.values():
             all_resolved_ips.extend(ips)
         unique_ips = list(set(all_resolved_ips))
-        logger.info("[RECON] [4/14] DNS completo: %d/%d resolvidos (%d IPs unicos) em %.1fs",
+        logger.info("[RECON] [4/15] DNS completo: %d/%d resolvidos (%d IPs unicos) em %.1fs",
                      len(resolved_hosts), len(scoped), len(unique_ips), time.time() - t0)
 
+        # DNS Zone Transfer check on root domains
+        zone_transfer_findings: list[dict] = []
+        for domain in root_domains:
+            try:
+                zt = check_dns_zone_transfer(domain)
+                zone_transfer_findings.extend(zt)
+            except Exception:
+                pass
+        if zone_transfer_findings:
+            logger.info("[RECON]        Zone Transfer: %d achados!", len(zone_transfer_findings))
+
         # --- Etapa 5: ASN discovery ---
-        logger.info("[RECON] [5/14] ASN discovery: analisando %d IPs...", len(unique_ips))
+        logger.info("[RECON] [5/15] ASN discovery: analisando %d IPs...", len(unique_ips))
         t0 = time.time()
         asn_result = discover_target_asns(unique_ips)
         asn_count = len(asn_result.get("asns", {}))
         prefix_count = asn_result.get("total_prefixes", 0)
-        logger.info("[RECON] [5/14] ASN completo: %d ASNs, %d prefixos em %.1fs",
+        logger.info("[RECON] [5/15] ASN completo: %d ASNs, %d prefixos em %.1fs",
                      asn_count, prefix_count, time.time() - t0)
 
         # --- Etapa 6: Reverse DNS sweep ---
-        logger.info("[RECON] [6/14] Reverse DNS: %d IPs...", len(unique_ips))
+        logger.info("[RECON] [6/15] Reverse DNS: %d IPs...", len(unique_ips))
         t0 = time.time()
         rdns_results = reverse_dns_sweep(unique_ips)
         rdns_new_subs: set[str] = set()
         for ip, hostname in rdns_results.items():
             if hostname not in all_subdomains and is_in_scope(hostname, in_scope, out_of_scope):
                 rdns_new_subs.add(hostname)
-        logger.info("[RECON] [6/14] Reverse DNS: %d PTRs, %d novos em escopo em %.1fs",
+        logger.info("[RECON] [6/15] Reverse DNS: %d PTRs, %d novos em escopo em %.1fs",
                      len(rdns_results), len(rdns_new_subs), time.time() - t0)
 
         # --- Etapa 7: Second scope filter + merge reverse DNS discoveries ---
         if rdns_new_subs:
-            logger.info("[RECON] [7/14] Merge: adicionando %d subdomínios do reverse DNS", len(rdns_new_subs))
+            logger.info("[RECON] [7/15] Merge: adicionando %d subdomínios do reverse DNS", len(rdns_new_subs))
             rdns_dns = resolve_dns(sorted(rdns_new_subs))
             dns_map.update(rdns_dns)
             scoped = list(set(scoped) | rdns_new_subs)
             all_subdomains.update(rdns_new_subs)
             resolved_hosts = list(dns_map.keys())
         else:
-            logger.info("[RECON] [7/14] Merge: nenhum subdomínio novo do reverse DNS")
+            logger.info("[RECON] [7/15] Merge: nenhum subdomínio novo do reverse DNS")
 
         # --- Etapa 8: httpx probe ---
-        logger.info("[RECON] [8/14] httpx: verificando %d hosts vivos...", len(resolved_hosts))
+        logger.info("[RECON] [8/15] httpx: verificando %d hosts vivos...", len(resolved_hosts))
         t0 = time.time()
         alive_results = run_httpx_probe(resolved_hosts)
         alive_hosts = {a["host"] for a in alive_results}
         httpx_by_host = {a.get("host", ""): a for a in alive_results if a.get("host")}
-        logger.info("[RECON] [8/14] httpx completo: %d/%d vivos em %.1fs",
+        logger.info("[RECON] [8/15] httpx completo: %d/%d vivos em %.1fs",
                      len(alive_hosts), len(resolved_hosts), time.time() - t0)
 
         # --- Etapa 9: Security checks ---
-        logger.info("[RECON] [9/14] Security checks: analisando %d hosts vivos...", len(httpx_by_host))
+        logger.info("[RECON] [9/15] Security checks: analisando %d hosts vivos...", len(httpx_by_host))
         t0 = time.time()
         recon_checks_by_host = {}
         for i, (host, data) in enumerate(httpx_by_host.items(), 1):
@@ -1106,13 +1133,13 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                             i, len(httpx_by_host), host, findings, high)
         total_findings = sum(v.get("total_findings", 0) for v in recon_checks_by_host.values())
         total_high = sum(v.get("high", 0) for v in recon_checks_by_host.values())
-        logger.info("[RECON] [9/14] Security checks completo: %d achados (%d HIGH) em %.1fs",
+        logger.info("[RECON] [9/15] Security checks completo: %d achados (%d HIGH) em %.1fs",
                      total_findings, total_high, time.time() - t0)
 
         # --- Etapa 10: HTTP Port Scanner (opcional) ---
         http_scanner_by_host: dict[str, Any] = {}
         if HTTP_PORT_SCANNER_ENABLED and alive_hosts:
-            logger.info("[RECON] [10/14] HTTP Port Scanner: %d hosts...", len(alive_hosts))
+            logger.info("[RECON] [10/15] HTTP Port Scanner: %d hosts...", len(alive_hosts))
             t0 = time.time()
             for host in sorted(alive_hosts):
                 try:
@@ -1122,29 +1149,53 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                     extra = []
                 if extra:
                     http_scanner_by_host[host] = extra
-            logger.info("[RECON] [10/14] Port Scanner completo: %d hosts com portas extras em %.1fs",
+            logger.info("[RECON] [10/15] Port Scanner completo: %d hosts com portas extras em %.1fs",
                          len(http_scanner_by_host), time.time() - t0)
         else:
-            logger.info("[RECON] [10/14] HTTP Port Scanner: desabilitado ou sem hosts")
+            logger.info("[RECON] [10/15] HTTP Port Scanner: desabilitado ou sem hosts")
 
-        # --- Etapa 11: Wayback Machine ---
-        logger.info("[RECON] [11/14] Wayback Machine: buscando URLs historicas...")
+        # --- Etapa 11: Wayback Machine + ParamSpider ---
+        logger.info("[RECON] [11/15] Wayback + ParamSpider: buscando URLs e parametros...")
         t0 = time.time()
         wayback_urls: dict[str, list[str]] = {}
+        paramspider_data: dict[str, dict] = {}
         for domain in root_domains[:3]:
             wb = run_wayback_enum(domain)
             if wb:
                 wayback_urls[domain] = wb
+            try:
+                ps = run_paramspider(domain)
+                if ps.get("params"):
+                    paramspider_data[domain] = ps
+            except Exception:
+                pass
         total_wb = sum(len(v) for v in wayback_urls.values())
-        logger.info("[RECON] [11/14] Wayback completo: %d URLs interessantes em %.1fs",
-                     total_wb, time.time() - t0)
+        total_params = sum(len(v.get("params", [])) for v in paramspider_data.values())
+        logger.info("[RECON] [11/15] Wayback: %d URLs | ParamSpider: %d params em %.1fs",
+                     total_wb, total_params, time.time() - t0)
 
-        # --- Etapa 12: Change detection ---
-        logger.info("[RECON] [12/14] Change detection...")
+        # --- Etapa 12: GitHub Dorking ---
+        github_findings: list[dict] = []
+        if os.getenv("GITHUB_TOKEN", "").strip():
+            logger.info("[RECON] [12/15] GitHub Dorking: buscando secrets vazados...")
+            t0 = time.time()
+            for domain in root_domains[:2]:
+                try:
+                    gf = run_github_dorking(domain)
+                    github_findings.extend(gf)
+                except Exception:
+                    pass
+            logger.info("[RECON] [12/15] GitHub Dorking: %d achados em %.1fs",
+                         len(github_findings), time.time() - t0)
+        else:
+            logger.info("[RECON] [12/15] GitHub Dorking: desabilitado (sem GITHUB_TOKEN)")
+
+        # --- Etapa 13: Change detection ---
+        logger.info("[RECON] [13/15] Change detection...")
         changes = _detect_and_save_changes(oid, prog_name, set(scoped), previous_subdomains)
 
-        # --- Etapa 13: Save to MongoDB ---
-        logger.info("[RECON] [13/14] Salvando %d targets no MongoDB...", len(scoped))
+        # --- Etapa 14: Save to MongoDB ---
+        logger.info("[RECON] [14/15] Salvando %d targets no MongoDB...", len(scoped))
         t0 = time.time()
         now = datetime.utcnow()
         saved = 0
@@ -1156,10 +1207,29 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             http_scanner = http_scanner_by_host.get(sub, [])
             is_new = sub in changes.get("new_subdomains", [])
 
+            # Inject zone transfer + github findings into recon_checks
+            extra_findings = list(zone_transfer_findings) + list(github_findings)
+            if extra_findings and is_alive:
+                if not isinstance(recon_checks.get("findings"), list):
+                    recon_checks["findings"] = []
+                for ef in extra_findings:
+                    recon_checks["findings"].append(ef)
+                    recon_checks["total_findings"] = len(recon_checks["findings"])
+                    sev = ef.get("severity", "low")
+                    recon_checks[sev] = recon_checks.get(sev, 0) + 1
+                    weights = {"high": 25, "medium": 12, "low": 5}
+                    recon_checks["risk_score"] = min(100, recon_checks.get("risk_score", 0) + weights.get(sev, 0))
+
             wb_for_sub = []
             for d, urls in wayback_urls.items():
                 if sub.endswith(d) or sub == d:
                     wb_for_sub = urls
+                    break
+
+            ps_for_sub: dict = {}
+            for d, ps in paramspider_data.items():
+                if sub.endswith(d) or sub == d:
+                    ps_for_sub = ps
                     break
 
             targets_col.update_one(
@@ -1175,6 +1245,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                         "recon_checks": recon_checks,
                         "http_scanner": http_scanner,
                         "wayback_urls": wb_for_sub[:20],
+                        "paramspider": ps_for_sub,
                         "is_new": is_new,
                         "last_recon": now,
                     }
@@ -1182,12 +1253,12 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                 upsert=True,
             )
             saved += 1
-        logger.info("[RECON] [13/14] MongoDB: %d targets salvos em %.1fs", saved, time.time() - t0)
+        logger.info("[RECON] [14/15] MongoDB: %d targets salvos em %.1fs", saved, time.time() - t0)
 
-        # --- Etapa 14: Auto-queue alive targets for Nuclei ---
-        logger.info("[RECON] [14/14] Nuclei auto-queue...")
+        # --- Etapa 15: Auto-queue alive targets for Nuclei ---
+        logger.info("[RECON] [15/15] Nuclei auto-queue...")
         nuclei_queued = _auto_queue_bounty_targets_for_nuclei()
-        logger.info("[RECON] [14/14] %d targets enfileirados para Nuclei", nuclei_queued)
+        logger.info("[RECON] [15/15] %d targets enfileirados para Nuclei", nuclei_queued)
 
         _inc_stat("subdomains_found", len(scoped))
         _inc_stat("hosts_alive", len(alive_hosts))

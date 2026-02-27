@@ -1,93 +1,136 @@
 "use client";
 
+import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "./AuthProvider";
+import { fetchHealth, type HealthInfo } from "@/lib/api";
 
 const NAV = [
-  { href: "/", label: "Programas", icon: "M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" },
+  {
+    href: "/",
+    label: "Dashboard",
+    icon: "M3.75 6A2.25 2.25 0 016 3.75h2.25A2.25 2.25 0 0110.5 6v2.25a2.25 2.25 0 01-2.25 2.25H6a2.25 2.25 0 01-2.25-2.25V6zM3.75 15.75A2.25 2.25 0 016 13.5h2.25a2.25 2.25 0 012.25 2.25V18a2.25 2.25 0 01-2.25 2.25H6A2.25 2.25 0 013.75 18v-2.25zM13.5 6a2.25 2.25 0 012.25-2.25H18A2.25 2.25 0 0120.25 6v2.25A2.25 2.25 0 0118 10.5h-2.25a2.25 2.25 0 01-2.25-2.25V6zM13.5 15.75a2.25 2.25 0 012.25-2.25H18a2.25 2.25 0 012.25 2.25V18A2.25 2.25 0 0118 20.25h-2.25A2.25 2.25 0 0113.5 18v-2.25z",
+  },
+  {
+    href: "/hackerone",
+    label: "HackerOne",
+    icon: "M12 21v-8.25M15.75 21v-8.25M8.25 21v-8.25M3 9l9-6 9 6m-1.5 12V10.332A48.36 48.36 0 0012 9.75c-2.551 0-5.056.2-7.5.582V21M3 21h18M12 6.75h.008v.008H12V6.75z",
+  },
 ];
 
 export default function DesktopLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { logout } = useAuth();
+  const [health, setHealth] = useState<HealthInfo | null>(null);
+
+  const loadHealth = useCallback(async () => {
+    try {
+      const h = await fetchHealth();
+      setHealth(h);
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    loadHealth();
+    const id = setInterval(loadHealth, 10_000);
+    return () => clearInterval(id);
+  }, [loadHealth]);
+
+  const apis = health?.apis ?? [];
+  const blockedCount = apis.filter(a => a.blocked).length;
 
   return (
-    <div className="min-h-screen bg-[var(--background)] text-[var(--foreground)] flex flex-col">
-      {/* Top header */}
-      <header className="border-b border-[var(--border)] bg-[var(--card)]/95 backdrop-blur sticky top-0 z-40">
-        <div className="mx-auto flex max-w-[1400px] items-center justify-between px-4 py-2.5 sm:py-3">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 sm:h-8 sm:w-8 items-center justify-center rounded-lg bg-[var(--accent)]/15 ring-1 ring-[var(--accent)]/30">
-              <span className="text-xs sm:text-sm font-bold tracking-tight text-[var(--accent)]">S</span>
-            </div>
-            <div className="flex flex-col">
-              <span className="text-sm font-semibold leading-tight tracking-tight">Scanner Bounty</span>
-              <span className="text-[10px] text-[var(--muted)] leading-tight hidden sm:block">
-                Recon · Bug bounty · HackerOne
-              </span>
-            </div>
+    <div className="h-screen bg-[var(--background)] text-[var(--foreground)] flex overflow-hidden">
+      <aside className="w-[260px] shrink-0 border-r border-[var(--border)] bg-[var(--card)]/60 backdrop-blur-sm flex flex-col">
+        <div className="flex items-center gap-3.5 px-6 py-6">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--accent)]/10 ring-1 ring-[var(--accent)]/20">
+            <svg className="w-6 h-6 text-[var(--accent-light)]" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+            </svg>
           </div>
-
-          {/* Desktop nav */}
-          <nav className="hidden sm:flex items-center gap-2 text-sm">
-            {NAV.map(({ href, label }) => {
-              const isActive = pathname === href || (href !== "/" && pathname.startsWith(href));
-              return (
-                <Link
-                  key={href}
-                  href={href}
-                  className={`rounded-full px-3 py-1.5 transition text-sm ${
-                    isActive
-                      ? "bg-[var(--accent)]/20 text-[var(--accent)] font-medium ring-1 ring-[var(--accent)]/40"
-                      : "bg-[var(--background)]/60 text-[var(--foreground)]/80 hover:bg-[var(--border)]/40 hover:text-[var(--foreground)]"
-                  }`}
-                >
-                  {label}
-                </Link>
-              );
-            })}
-            <button
-              onClick={logout}
-              className="rounded-full px-3 py-1.5 text-sm text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition ml-1"
-              title="Sair"
-            >
-              Sair
-            </button>
-          </nav>
+          <div>
+            <div className="text-lg font-bold tracking-tight text-[var(--foreground)]">Scanner</div>
+            <div className="text-sm text-[var(--muted)] tracking-wide">Bug Bounty</div>
+          </div>
         </div>
-      </header>
 
-      <main className="flex-1">
-        <div className="mx-auto min-h-[calc(100vh-4rem)] max-w-[1400px] px-3 py-4 sm:px-6 sm:py-8">
-          {children}
-        </div>
-      </main>
-
-      {/* Mobile bottom nav */}
-      <nav className="sm:hidden fixed bottom-0 inset-x-0 z-50 border-t border-[var(--border)] bg-[var(--card)]/95 backdrop-blur-lg">
-        <div className="flex items-stretch">
+        <nav className="flex flex-col gap-1.5 px-4 pt-2 flex-1">
           {NAV.map(({ href, label, icon }) => {
             const isActive = pathname === href || (href !== "/" && pathname.startsWith(href));
             return (
               <Link
                 key={href}
                 href={href}
-                className={`flex-1 flex flex-col items-center justify-center gap-0.5 py-2 transition-colors ${
+                className={`flex items-center gap-3.5 rounded-xl px-4 py-3.5 text-base font-medium transition-all ${
                   isActive
-                    ? "text-[var(--accent)]"
-                    : "text-[var(--muted)] active:text-[var(--foreground)]"
+                    ? "bg-[var(--accent)]/10 text-[var(--accent-light)] shadow-sm"
+                    : "text-[var(--muted)] hover:bg-white/[0.03] hover:text-[var(--foreground)]"
                 }`}
               >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <svg className="w-[22px] h-[22px] shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" d={icon} />
                 </svg>
-                <span className="text-[10px] font-medium">{label}</span>
+                {label}
               </Link>
             );
           })}
+        </nav>
+
+        {/* API Status */}
+        {apis.length > 0 && (
+          <div className="px-4 pb-2">
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--background)]/50 p-3">
+              <div className="flex items-center justify-between mb-2.5">
+                <span className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">APIs</span>
+                {blockedCount > 0 && (
+                  <span className="rounded-full bg-red-500/20 text-red-400 px-2 py-0.5 text-xs font-bold tabular-nums animate-pulse">
+                    {blockedCount} blocked
+                  </span>
+                )}
+              </div>
+              <div className="space-y-1.5">
+                {apis.map((api) => (
+                  <div
+                    key={api.name}
+                    className={`flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-sm ${
+                      api.blocked
+                        ? "bg-red-500/5 text-red-400"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={`h-2 w-2 rounded-full shrink-0 ${api.blocked ? "bg-red-500 animate-pulse" : "bg-emerald-500"}`} />
+                      <span className="font-medium truncate">{api.name}</span>
+                    </div>
+                    {api.blocked && (
+                      <span className="text-red-300 font-semibold tabular-nums shrink-0">{api.remaining_seconds}s</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="px-4 pb-5 pt-3">
+          <button
+            onClick={logout}
+            className="flex w-full items-center gap-3.5 rounded-xl px-4 py-3.5 text-base font-medium text-[var(--muted)] hover:text-red-400 hover:bg-red-500/5 transition-all"
+          >
+            <svg className="w-[22px] h-[22px] shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+            </svg>
+            Sair
+          </button>
         </div>
-      </nav>
+      </aside>
+
+      <main className="flex-1 overflow-y-auto">
+        <div className="min-h-full px-8 py-8 xl:px-10">
+          {children}
+        </div>
+      </main>
     </div>
   );
 }

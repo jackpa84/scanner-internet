@@ -6,36 +6,43 @@ services:
       - NET_ADMIN
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    sysctls:
+      - net.core.somaxconn=65535
+      - net.ipv4.tcp_tw_reuse=1
     env_file:
       - .env
     environment:
       MONGODB_URI: ${MONGODB_URI:-mongodb://user:password@scanner_db:27017/scanner_db?authSource=admin&connectTimeoutMS=30000&serverSelectionTimeoutMS=30000}
+      REDIS_URL: "redis://scanner_redis:6379/0"
 
       AUTH_USERNAME: "admin"
       AUTH_PASSWORD: "scanner2026"
       LOG_LEVEL: "INFO"
       PYTHONUNBUFFERED: "1"
 
-      # Desabilitar scanner de rede (worker foca em bounty)
       NETWORK_SCANNER_ENABLED: "false"
       NUM_WORKERS: "0"
 
-      # Bounty recon — core do worker
+      # Bounty recon (core do worker)
       BOUNTY_MODE: "true"
-      BOUNTY_RECON_INTERVAL: "10800"
-      BOUNTY_RECON_WORKERS: "3"
+      BOUNTY_RECON_INTERVAL: "7200"
+      BOUNTY_RECON_WORKERS: "5"
       SUBFINDER_TIMEOUT: "300"
       HTTPX_TIMEOUT: "300"
 
-      # Vuln scanner — auto-scan em targets de bounty
-      VULN_WORKERS: "2"
+      # Vuln scanner
+      VULN_WORKERS: "4"
       VULN_AUTO_SCAN: "true"
       VULN_AUTO_MIN_SCORE: "50"
       NUCLEI_SEVERITY: "critical,high,medium"
       NUCLEI_TIMEOUT: "120"
       NMAP_TIMEOUT: "180"
 
-      # Rate limits conservadores (compartilha APIs com main)
+      # Rate limits (compartilha APIs com main)
       SHODAN_RPS: "5"
       IPAPI_RPS: "0.5"
       IPINFO_RPS: "0.5"
@@ -48,7 +55,7 @@ services:
       # HackerOne
       HACKERONE_API_USERNAME: "${HACKERONE_API_USERNAME:-}"
 
-      # Integrations
+      # Tools
       BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
       BUG_SCRAPER_ARGS: "--mode discovery --output json --bounty-only"
       HTTP_PORT_SCANNER_ENABLED: "true"
@@ -63,6 +70,13 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+    deploy:
+      replicas: 3
+      resources:
+        limits:
+          memory: 2g
+        reservations:
+          memory: 512m
 
 networks:
   scanner_net:

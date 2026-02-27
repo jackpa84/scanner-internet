@@ -9,9 +9,11 @@ from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from bson import ObjectId
 import requests
+import pymongo.errors
 
 from fastapi.responses import PlainTextResponse
 
@@ -20,7 +22,8 @@ from app.database import (
     get_bounty_programs, get_bounty_targets, get_bounty_changes,
 )
 from app.scanner import (
-    run_scanner, NUM_SCANNER_WORKERS, SCAN_INTERVAL, SHODAN_RPS, IPAPI_RPS, IPINFO_RPS,
+    run_scanner, NUM_SCANNER_WORKERS, SCAN_INTERVAL, SHODAN_RPS, SHODAN_ENABLED,
+    IPAPI_RPS, IPINFO_RPS,
     compute_risk_profile, get_breaker_status, get_scan_stats,
 )
 from app.ip_feeds import get_feed_stats
@@ -62,6 +65,36 @@ logger = logging.getLogger("scanner")
 app = FastAPI(title="Scanner Internet API", version="2.0.0")
 
 
+def _storage_error_handler(request, exc: Exception):
+    logger.warning("Storage error: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "Storage temporarily unavailable"},
+    )
+
+
+app.add_exception_handler(
+    pymongo.errors.ServerSelectionTimeoutError,
+    _storage_error_handler,
+)
+app.add_exception_handler(
+    pymongo.errors.ConnectionFailure,
+    _storage_error_handler,
+)
+try:
+    import redis as _redis_mod
+    app.add_exception_handler(
+        _redis_mod.exceptions.ConnectionError,
+        _storage_error_handler,
+    )
+    app.add_exception_handler(
+        _redis_mod.exceptions.TimeoutError,
+        _storage_error_handler,
+    )
+except ImportError:
+    pass
+
+
 class RequestLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         start = time.perf_counter()
@@ -73,14 +106,17 @@ class RequestLogMiddleware(BaseHTTPMiddleware):
             logger.debug("[API] %s %s -> %s (%.0fms)", request.method, short, response.status_code, ms)
         return response
 
+# CORS: credentials=False permite allow_origins=["*"] (evita 403 no preflight)
+# O front usa Bearer no header, não cookies, então credentials não é necessário.
 app.add_middleware(RequestLogMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 
@@ -108,9 +144,12 @@ def root():
 @app.get("/api/results")
 def api_results():
     col = get_scan_results()
-    cursor = col.find().sort("timestamp", -1).limit(100)
+    if hasattr(col, "find_optimized"):
+        docs = col.find_optimized(sort_key="timestamp", sort_dir=-1, limit=100)
+    else:
+        docs = col.find().sort("timestamp", -1).limit(100)
     data = []
-    for doc in cursor:
+    for doc in docs:
         d = _serialize_doc(doc)
         d["router_count"] = len(d.get("router_info") or [])
         data.append(d)
@@ -137,29 +176,35 @@ def api_router_info(scan_id: str):
 @app.get("/api/stats")
 def api_stats():
     col = get_scan_results()
-    total = col.count_documents({})
-    with_ports = col.count_documents({"ports": {"$exists": True, "$ne": []}})
-    with_vulns = col.count_documents({"vulns": {"$exists": True, "$ne": []}})
-    with_router_info = col.count_documents({"router_info.0": {"$exists": True}})
-    with_high_risk = col.count_documents({"risk.score": {"$gte": 70}})
-    with_geo = col.count_documents({"geo.country": {"$exists": True, "$ne": ""}})
 
-    top_countries = list(col.aggregate([
-        {"$match": {"geo.country": {"$exists": True, "$ne": ""}}},
-        {"$group": {"_id": "$geo.country", "count": {"$sum": 1}}},
-        {"$sort": {"count": -1}},
-        {"$limit": 10},
-    ]))
+    def _compute_stats():
+        total = col.count_documents({})
+        with_ports = col.count_documents({"ports": {"$exists": True, "$ne": []}})
+        with_vulns = col.count_documents({"vulns": {"$exists": True, "$ne": []}})
+        with_router_info = col.count_documents({"router_info.0": {"$exists": True}})
+        with_high_risk = col.count_documents({"risk.score": {"$gte": 70}})
+        with_geo = col.count_documents({"geo.country": {"$exists": True, "$ne": ""}})
 
-    return {
-        "total": total,
-        "with_ports": with_ports,
-        "with_vulns": with_vulns,
-        "with_router_info": with_router_info,
-        "with_high_risk": with_high_risk,
-        "with_geo": with_geo,
-        "top_countries": [{"country": c["_id"], "count": c["count"]} for c in top_countries],
-    }
+        top_countries = list(col.aggregate([
+            {"$match": {"geo.country": {"$exists": True, "$ne": ""}}},
+            {"$group": {"_id": "$geo.country", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 10},
+        ]))
+
+        return {
+            "total": total,
+            "with_ports": with_ports,
+            "with_vulns": with_vulns,
+            "with_router_info": with_router_info,
+            "with_high_risk": with_high_risk,
+            "with_geo": with_geo,
+            "top_countries": [{"country": c["_id"], "count": c["count"]} for c in top_countries],
+        }
+
+    if hasattr(col, "cached_stats"):
+        return col.cached_stats(_compute_stats, ttl=10.0)
+    return _compute_stats()
 
 
 @app.get("/api/prioritized_findings")
@@ -167,11 +212,23 @@ def api_prioritized_findings(limit: int = 20, min_score: int = 40):
     limit = max(1, min(limit, 100))
     min_score = max(0, min(min_score, 100))
     col = get_scan_results()
-    cursor = col.find({"risk.score": {"$gte": min_score}}).sort("risk.score", -1).limit(limit)
-    results = [_serialize_doc(doc) for doc in cursor]
+
+    if hasattr(col, "find_optimized"):
+        docs = col.find_optimized(
+            filt={"risk.score": {"$gte": min_score}},
+            sort_key="risk.score", sort_dir=-1, limit=limit,
+        )
+        results = [_serialize_doc(doc) for doc in docs]
+    else:
+        cursor = col.find({"risk.score": {"$gte": min_score}}).sort("risk.score", -1).limit(limit)
+        results = [_serialize_doc(doc) for doc in cursor]
 
     if not results:
-        fallback = [_serialize_doc(doc) for doc in col.find().sort("timestamp", -1).limit(300)]
+        if hasattr(col, "find_optimized"):
+            fallback_docs = col.find_optimized(sort_key="timestamp", sort_dir=-1, limit=300)
+        else:
+            fallback_docs = col.find().sort("timestamp", -1).limit(300)
+        fallback = [_serialize_doc(doc) for doc in fallback_docs]
         fallback = [r for r in fallback if (r.get("risk") or {}).get("score", 0) >= min_score]
         fallback.sort(key=lambda x: (x.get("risk") or {}).get("score", 0), reverse=True)
         results = fallback[:limit]
@@ -196,10 +253,21 @@ def api_health():
     scan_stats = get_scan_stats()
     feed_stats = get_feed_stats()
     vuln_stats = get_vuln_scan_stats()
+
+    enrich_cache_stats = {}
+    try:
+        from app.redis_store import get_enrich_cache
+        cache = get_enrich_cache()
+        if cache:
+            enrich_cache_stats = cache.stats()
+    except Exception:
+        pass
+
     return {
         "network_scanner_enabled": NETWORK_SCANNER_ENABLED,
         "workers": NUM_SCANNER_WORKERS,
         "scan_interval": SCAN_INTERVAL,
+        "shodan_enabled": SHODAN_ENABLED,
         "shodan_rps": SHODAN_RPS,
         "ipapi_rps": IPAPI_RPS,
         "ipinfo_rps": IPINFO_RPS,
@@ -208,7 +276,80 @@ def api_health():
         "scan_stats": scan_stats,
         "feeds": feed_stats,
         "vuln_scanner": vuln_stats,
+        "enrich_cache": enrich_cache_stats,
     }
+
+
+@app.get("/api/db/activity")
+def api_db_activity(limit: int = 30):
+    """Real-time MongoDB activity log: latest writes across all collections."""
+    limit = max(1, min(limit, 100))
+    activity: list[dict] = []
+
+    try:
+        col = get_scan_results()
+        proj = {"ip": 1, "risk.score": 1, "risk.level": 1, "ports": 1, "vulns": 1, "geo.country": 1, "timestamp": 1}
+        if hasattr(col, "find_optimized"):
+            scan_docs = col.find_optimized(projection=proj, sort_key="timestamp", sort_dir=-1, limit=limit)
+        else:
+            scan_docs = col.find({}, proj).sort("timestamp", -1).limit(limit)
+        for doc in scan_docs:
+            ts = doc.get("timestamp")
+            activity.append({
+                "collection": "scan_results",
+                "action": "scan",
+                "summary": f"{doc.get('ip', '?')} | risk:{(doc.get('risk') or {}).get('score', 0)} | ports:{len(doc.get('ports', []))} | vulns:{len(doc.get('vulns', []))}",
+                "ip": doc.get("ip", ""),
+                "risk_level": (doc.get("risk") or {}).get("level", ""),
+                "country": (doc.get("geo") or {}).get("country", ""),
+                "timestamp": ts.isoformat() + "Z" if ts and hasattr(ts, "isoformat") else "",
+            })
+
+        vcol = get_vuln_results()
+        for doc in vcol.find({}, {"ip": 1, "severity": 1, "name": 1, "template_id": 1, "tool": 1, "timestamp": 1}).sort("timestamp", -1).limit(limit):
+            ts = doc.get("timestamp")
+            activity.append({
+                "collection": "vuln_results",
+                "action": "vuln",
+                "summary": f"{doc.get('ip', '?')} | {doc.get('severity', '?')} | {doc.get('name') or doc.get('template_id', '?')}",
+                "ip": doc.get("ip", ""),
+                "risk_level": doc.get("severity", ""),
+                "country": "",
+                "timestamp": ts.isoformat() + "Z" if ts and hasattr(ts, "isoformat") else "",
+            })
+
+        tcol = get_bounty_targets()
+        for doc in tcol.find({}, {"domain": 1, "alive": 1, "status": 1, "is_new": 1, "last_recon": 1}).sort("last_recon", -1).limit(min(limit, 10)):
+            ts = doc.get("last_recon")
+            tag = "NEW " if doc.get("is_new") else ""
+            alive = "alive" if doc.get("alive") else "dead"
+            activity.append({
+                "collection": "bounty_targets",
+                "action": "recon",
+                "summary": f"{tag}{doc.get('domain', '?')} | {alive} | {doc.get('status', '')}",
+                "ip": "",
+                "risk_level": "",
+                "country": "",
+                "timestamp": ts.isoformat() + "Z" if ts and hasattr(ts, "isoformat") else "",
+            })
+
+        activity.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        activity = activity[:limit]
+    except Exception as e:
+        return {"error": str(e), "activity": [], "counts": {}}
+
+    try:
+        counts = {
+            "scan_results": get_scan_results().estimated_document_count(),
+            "vuln_results": get_vuln_results().estimated_document_count(),
+            "bounty_programs": get_bounty_programs().estimated_document_count(),
+            "bounty_targets": get_bounty_targets().estimated_document_count(),
+            "bounty_changes": get_bounty_changes().estimated_document_count(),
+        }
+    except Exception:
+        counts = {}
+
+    return {"activity": activity, "counts": counts}
 
 
 # ---------------------------------------------------------------------------
@@ -874,7 +1015,7 @@ def api_bounty_submit_hackerone(program_id: str, body: dict | None = None):
 
 @app.get("/api/hackerone/me")
 def api_hackerone_me():
-    """Test HackerOne API credentials. Returns the authenticated user profile."""
+    """Test HackerOne API credentials by listing programs."""
     username = (os.getenv("HACKERONE_API_USERNAME") or "").strip()
     token = (os.getenv("HACKERONE_API_TOKEN") or "").strip()
     if not username or not token:
@@ -884,7 +1025,8 @@ def api_hackerone_me():
         )
     try:
         r = requests.get(
-            "https://api.hackerone.com/v1/me",
+            "https://api.hackerone.com/v1/hackers/programs",
+            params={"page[size]": "1"},
             auth=(username, token),
             headers={"Accept": "application/json"},
             timeout=15,
@@ -900,7 +1042,83 @@ def api_hackerone_me():
         raise HTTPException(status_code=r.status_code, detail=f"HackerOne returned {r.status_code}: {r.text[:300]}")
 
     data = r.json() or {}
-    return {"ok": True, "user": data}
+    return {"ok": True, "username": username, "programs": len(data.get("data", []))}
+
+
+def _hackerone_request(method: str, path: str, params: dict | None = None, json_body: dict | None = None) -> tuple[dict | list, int]:
+    """Chama a API HackerOne (hacker). path sem leading slash, ex: 'v1/hackers/reports'."""
+    username = (os.getenv("HACKERONE_API_USERNAME") or "").strip()
+    token = (os.getenv("HACKERONE_API_TOKEN") or "").strip()
+    if not username or not token:
+        raise HTTPException(status_code=503, detail="HACKERONE_API_USERNAME and HACKERONE_API_TOKEN not configured")
+    url = f"https://api.hackerone.com/{path}" if not path.startswith("http") else path
+    try:
+        r = requests.request(
+            method,
+            url,
+            params=params,
+            json=json_body,
+            auth=(username, token),
+            headers={"Accept": "application/json"},
+            timeout=30,
+        )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"HackerOne request failed: {e!s}")
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="Invalid HackerOne credentials")
+    if r.status_code == 403:
+        raise HTTPException(status_code=403, detail="Forbidden (IP or token permissions)")
+    if r.status_code == 429:
+        raise HTTPException(status_code=429, detail="HackerOne rate limit (600/min read, 25/20s write)")
+    data = r.json() if r.content else {}
+    return data, r.status_code
+
+
+@app.get("/api/hackerone/reports")
+def api_hackerone_reports(page_size: int = 25, page_before: str | None = None, page_after: str | None = None):
+    """
+    Lista os reports (submissões) do hacker na HackerOne.
+    Paginação: page_size (default 25), page_before ou page_after (cursor do link next/prev).
+    Requer HACKERONE_API_USERNAME e HACKERONE_API_TOKEN.
+    """
+    params = {"page[size]": min(max(1, page_size), 100)}
+    if page_before:
+        params["page[before]"] = page_before
+    if page_after:
+        params["page[after]"] = page_after
+    data, _ = _hackerone_request("GET", "v1/hackers/reports", params=params)
+    return data
+
+
+@app.get("/api/hackerone/earnings")
+def api_hackerone_earnings(page_size: int = 25, page_before: str | None = None, page_after: str | None = None):
+    """
+    Lista os earnings (bounties recebidos) do hacker na HackerOne.
+    Paginação: page_size (default 25), page_before ou page_after.
+    Requer HACKERONE_API_USERNAME e HACKERONE_API_TOKEN.
+    """
+    params = {"page[size]": min(max(1, page_size), 100)}
+    if page_before:
+        params["page[before]"] = page_before
+    if page_after:
+        params["page[after]"] = page_after
+    data, _ = _hackerone_request("GET", "v1/hackers/earnings", params=params)
+    return data
+
+
+@app.get("/api/hackerone/programs")
+def api_hackerone_programs(page_size: int = 100, page_before: str | None = None, page_after: str | None = None):
+    """
+    Lista os programas disponíveis para o hacker (programs onde pode submeter).
+    Paginação: page_size, page_before ou page_after.
+    """
+    params = {"page[size]": min(max(1, page_size), 100)}
+    if page_before:
+        params["page[before]"] = page_before
+    if page_after:
+        params["page[after]"] = page_after
+    data, _ = _hackerone_request("GET", "v1/hackers/programs", params=params)
+    return data
 
 
 @app.get("/api/bounty/stats")
@@ -938,11 +1156,13 @@ def on_startup():
         "=== Scanner Internet v2 ===\n"
         "    NetScanner: %s\n"
         "    Workers: %s | Intervalo: %.1fs\n"
-        "    Shodan: %.0f req/s | ip-api: %.1f req/s | IPinfo: %.1f req/s\n"
+        "    Shodan: %s | ip-api: %.1f req/s | IPinfo: %.1f req/s\n"
         "    Vuln: %d workers | auto=%s | sev=%s\n"
         "    Bounty: %s\n"
         "    Log: %s | CORS: *",
-        NETWORK_SCANNER_ENABLED, NUM_SCANNER_WORKERS, SCAN_INTERVAL, SHODAN_RPS, IPAPI_RPS, IPINFO_RPS,
+        NETWORK_SCANNER_ENABLED, NUM_SCANNER_WORKERS, SCAN_INTERVAL,
+        "OFF" if not SHODAN_ENABLED else f"{SHODAN_RPS:.0f} req/s",
+        IPAPI_RPS, IPINFO_RPS,
         NUM_VULN_WORKERS, VULN_AUTO_SCAN, NUCLEI_SEVERITY, BOUNTY_MODE, LOG_LEVEL,
     )
     init_db()

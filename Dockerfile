@@ -2,12 +2,12 @@ FROM python:3.10-slim AS builder
 
 WORKDIR /app
 
-RUN pip install poetry
+RUN pip install --no-cache-dir poetry
 
 COPY pyproject.toml poetry.lock* ./
 
 RUN poetry config virtualenvs.create false \
-    && poetry install --no-interaction --no-ansi --no-root
+    && poetry install --no-interaction --no-ansi --no-root --without dev
 
 FROM python:3.10-slim
 
@@ -44,14 +44,15 @@ RUN apt-get update \
     && rm /tmp/httpx.zip \
     && apt-get purge -y wget unzip \
     && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache
 
 COPY tools/bug-scraper.py /opt/Bug_Scraper/bug-scraper.py
 
 COPY app/ ./app/
 
-ENV MONGODB_URI=mongodb://user:password@db:27017/scanner_db?authSource=admin
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONOPTIMIZE=2
 
 EXPOSE 5000
 

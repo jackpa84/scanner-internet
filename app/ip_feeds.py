@@ -12,6 +12,11 @@ Fontes gerais (network scanner):
 Fontes bounty-aware:
   7. ASN discovery — descobre ASNs dos alvos de bounty e enumera prefixos
   8. Bounty target feed — prioriza IPs de organizações com programas ativos
+
+Feedback loop (v4):
+  - CIDR scoring: tracks which /16 blocks produce high-risk IPs
+  - Weighted random selection favors productive CIDRs
+  - Dead CIDRs get deprioritized over time
 """
 
 import ipaddress
@@ -179,6 +184,76 @@ def identify_cloud_provider(ip_str: str) -> str | None:
     return None
 _feed_stats_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# CIDR Scoring — feedback loop from scan results
+# ---------------------------------------------------------------------------
+_cidr_scores: dict[str, dict[str, float]] = {}
+_cidr_scores_lock = threading.Lock()
+CIDR_SCORE_DECAY = 0.99
+CIDR_TOP_N = 50
+
+
+def report_scan_result(ip: str, alive: bool, risk_score: int) -> None:
+    """Called by scanner after each IP scan to update CIDR quality scores.
+
+    Builds a /16 → score mapping that generate_smart_ip uses to prefer
+    productive address ranges.
+    """
+    try:
+        parts = ip.split(".")
+        cidr_key = f"{parts[0]}.{parts[1]}.0.0/16"
+    except (IndexError, ValueError):
+        return
+
+    with _cidr_scores_lock:
+        if cidr_key not in _cidr_scores:
+            _cidr_scores[cidr_key] = {"score": 0.0, "scans": 0, "alive": 0, "high_risk": 0}
+        entry = _cidr_scores[cidr_key]
+        entry["scans"] += 1
+        if alive:
+            entry["alive"] += 1
+            entry["score"] += 1.0
+            if risk_score >= 40:
+                entry["score"] += 5.0
+            if risk_score >= 70:
+                entry["score"] += 15.0
+                entry["high_risk"] += 1
+        else:
+            entry["score"] -= 0.5
+
+
+def _get_top_cidrs(n: int = CIDR_TOP_N) -> list[str]:
+    """Return top N CIDRs by score for weighted IP generation."""
+    with _cidr_scores_lock:
+        if not _cidr_scores:
+            return []
+        items = sorted(_cidr_scores.items(), key=lambda x: x[1]["score"], reverse=True)
+        return [k for k, v in items[:n] if v["score"] > 0]
+
+
+def _decay_cidr_scores() -> None:
+    """Periodically decay scores so stale CIDRs lose priority."""
+    while True:
+        time.sleep(600)
+        with _cidr_scores_lock:
+            to_remove = []
+            for key, entry in _cidr_scores.items():
+                entry["score"] *= CIDR_SCORE_DECAY
+                if entry["score"] < 0.1 and entry["scans"] > 10:
+                    to_remove.append(key)
+            for key in to_remove:
+                del _cidr_scores[key]
+
+
+def get_cidr_score_stats() -> dict[str, Any]:
+    with _cidr_scores_lock:
+        total = len(_cidr_scores)
+        if not _cidr_scores:
+            return {"total_cidrs_tracked": 0, "top_5": []}
+        items = sorted(_cidr_scores.items(), key=lambda x: x[1]["score"], reverse=True)
+        top = [{"cidr": k, **v} for k, v in items[:5]]
+        return {"total_cidrs_tracked": total, "top_5": top}
+
 
 def get_feed_stats() -> dict[str, Any]:
     with _feed_stats_lock:
@@ -191,6 +266,7 @@ def get_feed_stats() -> dict[str, Any]:
     s["cloud"] = get_cloud_prefixes()
     with _cdn_lock:
         s["cdn_ranges"] = len(_cdn_networks)
+    s["cidr_scoring"] = get_cidr_score_stats()
     return s
 
 
@@ -336,16 +412,18 @@ BOUNTY_FEED_MODE = os.getenv("BOUNTY_MODE", "true").lower() in ("1", "true", "ye
 
 
 def generate_smart_ip() -> str:
-    """Generate an IP with bounty-aware priorities.
+    """Generate an IP with bounty-aware priorities + feedback loop.
 
     When bounty prefixes exist:
-      70% bounty target ASN prefixes (IPs from orgs with bounty programs)
-      20% hosting CIDR
+      60% bounty target ASN prefixes
+      15% top-scoring CIDRs (feedback loop)
+      15% hosting CIDR
       10% random
 
-    Without bounty prefixes (fallback to original):
-      60% hosting CIDR
-      25% BGP prefixes
+    Without bounty prefixes:
+      40% hosting CIDR
+      25% top-scoring CIDRs (feedback loop)
+      20% BGP prefixes
       15% random
     """
     roll = random.random()
@@ -353,13 +431,25 @@ def generate_smart_ip() -> str:
     with _bounty_prefixes_lock:
         has_bounty = len(_bounty_prefixes) > 0
 
+    top_cidrs = _get_top_cidrs()
+
     if has_bounty and BOUNTY_FEED_MODE:
-        if roll < 0.70:
+        if roll < 0.60:
             with _bounty_prefixes_lock:
                 net = random.choice(_bounty_prefixes)
             ip = _random_ip_from_cidr(net)
             if is_public(ip):
                 return ip
+
+        if roll < 0.75 and top_cidrs:
+            cidr_str = random.choice(top_cidrs)
+            try:
+                net = ipaddress.ip_network(cidr_str, strict=False)
+                ip = _random_ip_from_cidr(net)
+                if is_public(ip):
+                    return ip
+            except ValueError:
+                pass
 
         if roll < 0.90 and _hosting_networks:
             net = random.choice(_hosting_networks)
@@ -369,11 +459,21 @@ def generate_smart_ip() -> str:
 
         return _random_public_ip()
 
-    if roll < 0.60 and _hosting_networks:
+    if roll < 0.40 and _hosting_networks:
         net = random.choice(_hosting_networks)
         ip = _random_ip_from_cidr(net)
         if is_public(ip):
             return ip
+
+    if roll < 0.65 and top_cidrs:
+        cidr_str = random.choice(top_cidrs)
+        try:
+            net = ipaddress.ip_network(cidr_str, strict=False)
+            ip = _random_ip_from_cidr(net)
+            if is_public(ip):
+                return ip
+        except ValueError:
+            pass
 
     if roll < 0.85:
         with _prefixes_lock:
@@ -925,6 +1025,9 @@ def _periodic_feeds() -> None:
 
 
 def start_feeds() -> None:
+    if os.getenv("FEED_ENABLED", "true").lower() in ("0", "false", "no"):
+        logger.info("[FEED] Desativado por FEED_ENABLED=false (evita timeouts sem internet)")
+        return
     # One-time feeds (run once at startup)
     startup_feeds = [
         ("ripe-stat", _feed_ripe_stat),
@@ -951,6 +1054,7 @@ def start_feeds() -> None:
         ("masscan", _feed_masscan),
         ("bounty-targets", _feed_bounty_targets),
         ("periodic-refresh", _periodic_feeds),
+        ("cidr-score-decay", _decay_cidr_scores),
     ]
 
     all_feeds = startup_feeds + queue_feeds + continuous_feeds

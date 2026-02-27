@@ -1,4 +1,9 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5001";
+// Se NEXT_PUBLIC_API_URL estiver vazio ou não definido, usamos "" para que o browser
+// faça requisições à mesma origem; o Next.js faz rewrite de /api/* para o backend.
+const API_BASE =
+  typeof process.env.NEXT_PUBLIC_API_URL === "string" && process.env.NEXT_PUBLIC_API_URL.trim() !== ""
+    ? process.env.NEXT_PUBLIC_API_URL.replace(/\/$/, "")
+    : "";
 
 const TOKEN_KEY = "scanner_auth_token";
 
@@ -31,7 +36,11 @@ export async function login(username: string, password: string): Promise<{ token
     throw new Error(err.detail || "Login falhou");
   }
   const data = await res.json();
-  setToken(data.token);
+  const token = data?.token;
+  if (!token || typeof token !== "string") {
+    throw new Error("Resposta invalida do servidor (sem token)");
+  }
+  setToken(token);
   return data;
 }
 
@@ -103,6 +112,28 @@ export interface HealthInfo {
 }
 
 export const fetchHealth = () => apiFetch<HealthInfo>("/api/health");
+
+// ---------------------------------------------------------------------------
+// DB Activity Log
+// ---------------------------------------------------------------------------
+export interface DbActivityEntry {
+  collection: string;
+  action: string;
+  summary: string;
+  ip: string;
+  risk_level: string;
+  country: string;
+  timestamp: string;
+}
+
+export interface DbActivity {
+  activity: DbActivityEntry[];
+  counts: Record<string, number>;
+  error?: string;
+}
+
+export const fetchDbActivity = (limit = 30) =>
+  apiFetch<DbActivity>(`/api/db/activity?limit=${limit}`);
 
 // ---------------------------------------------------------------------------
 // Vuln Scanner (used by VulnPanel)
@@ -245,6 +276,11 @@ export interface BountyTarget {
       evidence?: string;
     }>;
   };
+  wayback_urls?: string[];
+  paramspider?: {
+    params?: string[];
+    urls_with_params?: string[];
+  };
   is_new?: boolean;
   last_recon?: string;
 }
@@ -343,6 +379,40 @@ export const submitBountyToHackerOne = (
     `/api/bounty/programs/${programId}/submit_hackerone`,
     body ?? {}
   );
+
+/** Parâmetros de paginação para listagens HackerOne (reports, earnings, programs). */
+export type HackerOnePageParams = {
+  page_size?: number;
+  page_before?: string;
+  page_after?: string;
+};
+
+/** Resposta JSON:API da HackerOne (data + links com next/prev). */
+export type HackerOneListResponse = {
+  data?: unknown[];
+  links?: { next?: string; prev?: string; first?: string; last?: string };
+};
+
+function buildQuery(params: HackerOnePageParams): string {
+  const q = new URLSearchParams();
+  if (params.page_size != null) q.set("page_size", String(params.page_size));
+  if (params.page_before) q.set("page_before", params.page_before);
+  if (params.page_after) q.set("page_after", params.page_after);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+/** Lista reports (submissões) do hacker na HackerOne. Requer credenciais no backend. */
+export const fetchHackerOneReports = (params: HackerOnePageParams = {}) =>
+  apiFetch<HackerOneListResponse>(`/api/hackerone/reports${buildQuery(params)}`);
+
+/** Lista earnings (bounties recebidos) do hacker na HackerOne. */
+export const fetchHackerOneEarnings = (params: HackerOnePageParams = {}) =>
+  apiFetch<HackerOneListResponse>(`/api/hackerone/earnings${buildQuery(params)}`);
+
+/** Lista programas HackerOne disponíveis para o hacker. */
+export const fetchHackerOnePrograms = (params: HackerOnePageParams = {}) =>
+  apiFetch<HackerOneListResponse>(`/api/hackerone/programs${buildQuery(params)}`);
 
 export const triggerBountyTargetScan = (targetId: string) =>
   API_POST<{ queued: boolean; domain: string }>(`/api/bounty/targets/${targetId}/scan`, {});

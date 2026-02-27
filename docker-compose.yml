@@ -1,7 +1,47 @@
 services:
+  redis:
+    image: redis:7-alpine
+    container_name: scanner_redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --appendfsync everysec
+      --save 300 10
+      --save 60 10000
+      --tcp-backlog 511
+      --hz 100
+      --dynamic-hz yes
+      --lazyfree-lazy-eviction yes
+      --lazyfree-lazy-expire yes
+      --lazyfree-lazy-server-del yes
+      --io-threads 2
+      --io-threads-do-reads yes
+      --activedefrag yes
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 1280m
+        reservations:
+          memory: 512m
+
   app:
     build: .
     container_name: scanner_app
+    depends_on:
+      redis:
+        condition: service_healthy
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -9,83 +49,115 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+    ulimits:
+      nofile:
+        soft: 131072
+        hard: 131072
+    sysctls:
+      - net.core.somaxconn=65535
+      - net.ipv4.tcp_tw_reuse=1
+      - net.ipv4.ip_local_port_range=1024 65535
     env_file:
       - .env
     environment:
       AUTH_USERNAME: "admin"
       AUTH_PASSWORD: "scanner2026"
-      MONGODB_URI: mongodb://admin:admin%40321@34.193.59.58:27017/admin?authSource=admin
+      REDIS_URL: "redis://redis:6379/0"
+      FEED_ENABLED: "false"
       LOG_LEVEL: "INFO"
       NETWORK_SCANNER_ENABLED: "true"
       PYTHONUNBUFFERED: "1"
-      NUM_WORKERS: "250"
-      SCAN_INTERVAL: "0.01"
+
+      # --- Performance: scanner ---
+      NUM_WORKERS: "800"
+      SCAN_INTERVAL: "0"
+      PRESCAN_TIMEOUT: "0.2"
+      BATCH_SIZE: "200"
+      BATCH_FLUSH_INTERVAL: "0.5"
+      MAX_CONCURRENT_CONNS: "20000"
+
+      # --- Performance: enrichment rate limits ---
       SHODAN_RPS: "15"
       IPAPI_RPS: "1.5"
       IPINFO_RPS: "1.5"
-      PRESCAN_TIMEOUT: "0.3"
-      BATCH_SIZE: "50"
-      BATCH_FLUSH_INTERVAL: "2.0"
+
+      # --- Masscan ---
       MASSCAN_ENABLED: "auto"
-      MASSCAN_RATE: "50000"
-      ABUSEIPDB_KEY: ""
-      IPINFO_TOKEN: ""
+      MASSCAN_RATE: "100000"
+
+      # --- Vuln scanner (mais workers) ---
       VULN_WORKERS: "4"
       VULN_AUTO_SCAN: "true"
       VULN_AUTO_MIN_SCORE: "60"
       NUCLEI_SEVERITY: "critical,high,medium"
       NUCLEI_TIMEOUT: "300"
       NMAP_TIMEOUT: "180"
+
+      # --- Bounty (mais workers de recon) ---
       BOUNTY_MODE: "true"
       BOUNTY_RECON_INTERVAL: "21600"
-      BOUNTY_RECON_WORKERS: "2"
+      BOUNTY_RECON_WORKERS: "3"
       SUBFINDER_TIMEOUT: "300"
       HTTPX_TIMEOUT: "300"
-      HACKERONE_API_USERNAME: "jackpa"
+
+      # --- HackerOne ---
+      HACKERONE_API_USERNAME: "jackpa1984"
+
+      # --- Tools ---
       BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
       BUG_SCRAPER_ARGS: "--mode discovery --output json"
       HTTP_PORT_SCANNER_ENABLED: "true"
       HTTP_PORT_SCANNER_PATH: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
+
+      ABUSEIPDB_KEY: ""
+      IPINFO_TOKEN: ""
     volumes:
       - ./app:/app/app
     restart: unless-stopped
-    command: >
-      sh -c "
-        echo 'Aguardando MongoDB em 34.193.59.58:27017...' &&
-        for i in 1 2 3 4 5 6 7 8 9 10; do
-          python -c \"import socket; s=socket.create_connection(('34.193.59.58',27017),5); s.close(); print('MongoDB OK')\" && break
-          echo \"Tentativa $$i falhou, aguardando 3s...\"
-          sleep 3
-        done &&
-        exec uvicorn app.main:app --host 0.0.0.0 --port 5000 --log-level debug
-      "
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "info", "--timeout-keep-alive", "30"]
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+        reservations:
+          memory: 1g
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
     container_name: scanner_frontend
     depends_on:
       - app
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:5001
-      CHOKIDAR_USEPOLLING: "true"
+      NEXT_PUBLIC_API_URL: ""
+      API_BACKEND_URL: http://app:5000
+      NODE_ENV: development
       WATCHPACK_POLLING: "true"
+      CHOKIDAR_USEPOLLING: "true"
     volumes:
       - ./frontend:/app
-      - frontend_node_modules:/app/node_modules
-    command: ["sh", "-c", "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"]
+      - /app/node_modules
+      - /app/.next
     restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 512m
 
 volumes:
-  frontend_node_modules:
+  redis_data:

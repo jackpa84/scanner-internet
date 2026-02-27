@@ -28,8 +28,10 @@ AUTH_USERNAME = os.getenv("AUTH_USERNAME", "admin")
 AUTH_PASSWORD = os.getenv("AUTH_PASSWORD", "scanner2026")
 AUTH_SECRET = os.getenv("AUTH_SECRET", secrets.token_hex(32))
 AUTH_TOKEN_HOURS = int(os.getenv("AUTH_TOKEN_HOURS", "24"))
+# AUTH_ENABLED=false desativa a exigência de login; todas as rotas /api/* ficam públicas
+AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() in ("1", "true", "yes")
 
-PUBLIC_PATHS = {"/api/auth/login", "/docs", "/openapi.json", "/redoc"}
+PUBLIC_PATHS = {"/api/auth/login", "/api/health", "/docs", "/openapi.json", "/redoc"}
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -88,7 +90,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
 
-        if path in PUBLIC_PATHS or not path.startswith("/api/"):
+        if not AUTH_ENABLED or path in PUBLIC_PATHS or not path.startswith("/api/"):
             return await call_next(request)
 
         auth_header = request.headers.get("authorization", "")

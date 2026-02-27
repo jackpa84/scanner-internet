@@ -29,6 +29,17 @@ NUCLEI_TIMEOUT = int(os.getenv("NUCLEI_TIMEOUT", "120"))
 NMAP_TIMEOUT = int(os.getenv("NMAP_TIMEOUT", "180"))
 AUTO_MIN_SCORE = int(os.getenv("VULN_AUTO_MIN_SCORE", "70"))
 
+FFUF_ENABLED = os.getenv("FFUF_ENABLED", "true").lower() in ("1", "true", "yes")
+FFUF_WORDLIST = os.getenv("FFUF_WORDLIST", "/usr/share/seclists/Discovery/Web-Content/common.txt")
+FFUF_TIMEOUT = int(os.getenv("FFUF_TIMEOUT", "90"))
+DALFOX_ENABLED = os.getenv("DALFOX_ENABLED", "true").lower() in ("1", "true", "yes")
+DALFOX_TIMEOUT = int(os.getenv("DALFOX_TIMEOUT", "90"))
+SQLMAP_ENABLED = os.getenv("SQLMAP_ENABLED", "false").lower() in ("1", "true", "yes")
+SQLMAP_TIMEOUT = int(os.getenv("SQLMAP_TIMEOUT", "120"))
+TESTSSL_ENABLED = os.getenv("TESTSSL_ENABLED", "true").lower() in ("1", "true", "yes")
+TESTSSL_TIMEOUT = int(os.getenv("TESTSSL_TIMEOUT", "90"))
+WAFW00F_ENABLED = os.getenv("WAFW00F_ENABLED", "true").lower() in ("1", "true", "yes")
+
 _vuln_queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=500)
 _scanned_ips: set[str] = set()
 _scanned_lock = threading.Lock()
@@ -307,6 +318,355 @@ def _nmap_severity(script_id: str, output: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# ffuf — directory/path fuzzing
+# ---------------------------------------------------------------------------
+def run_ffuf_scan(host: str, ports: list[int] | None = None, hostname: str | None = None) -> list[dict]:
+    """Run ffuf directory fuzzing against a web target."""
+    if not FFUF_ENABLED:
+        return []
+
+    import shutil
+    if not shutil.which("ffuf"):
+        return []
+    if not os.path.isfile(FFUF_WORDLIST):
+        logger.debug("[VULN] ffuf: wordlist not found at %s", FFUF_WORDLIST)
+        return []
+
+    target = hostname or host
+    urls = [f"https://{target}", f"http://{target}"]
+    findings = []
+
+    for base_url in urls:
+        cmd = [
+            "ffuf",
+            "-u", f"{base_url}/FUZZ",
+            "-w", FFUF_WORDLIST,
+            "-mc", "200,201,301,302,403",
+            "-fc", "404",
+            "-t", "30",
+            "-timeout", "5",
+            "-json",
+            "-s",
+            "-maxtime", str(FFUF_TIMEOUT),
+        ]
+
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=FFUF_TIMEOUT + 15)
+            for line in result.stdout.strip().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    status = obj.get("status", 0)
+                    path = obj.get("input", {}).get("FUZZ", obj.get("url", ""))
+                    url = obj.get("url", f"{base_url}/{path}")
+                    length = obj.get("length", 0)
+
+                    severity = "medium"
+                    if any(kw in path.lower() for kw in ["admin", "backup", "config", "debug", "secret", "internal"]):
+                        severity = "high"
+                    elif status == 403:
+                        severity = "low"
+
+                    findings.append({
+                        "tool": "ffuf",
+                        "template_id": f"ffuf-{status}-{path}",
+                        "name": f"Diretorio/path encontrado: /{path} ({status})",
+                        "severity": severity,
+                        "description": f"ffuf encontrou /{path} com status {status} e {length} bytes",
+                        "matched_at": url,
+                        "proof": f"Status: {status} | Length: {length}",
+                        "references": [],
+                        "port": 443 if "https" in base_url else 80,
+                        "tags": ["ffuf", "directory", f"status-{status}"],
+                    })
+                except json.JSONDecodeError:
+                    continue
+
+            if findings:
+                break
+
+        except subprocess.TimeoutExpired:
+            logger.warning("[VULN] ffuf timeout para %s", target)
+        except FileNotFoundError:
+            break
+        except Exception as e:
+            logger.debug("[VULN] ffuf erro: %s", e)
+
+    if findings:
+        logger.info("[VULN] ffuf %s: %d paths encontrados", target, len(findings))
+    return findings[:20]
+
+
+# ---------------------------------------------------------------------------
+# dalfox — XSS scanner
+# ---------------------------------------------------------------------------
+def run_dalfox_scan(host: str, hostname: str | None = None) -> list[dict]:
+    """Run dalfox XSS scanner against a web target."""
+    if not DALFOX_ENABLED:
+        return []
+
+    import shutil
+    if not shutil.which("dalfox"):
+        return []
+
+    target = hostname or host
+    url = f"https://{target}"
+    cmd = [
+        "dalfox", "url", url,
+        "--silence",
+        "--no-color",
+        "--format", "json",
+        "--timeout", "5",
+        "--delay", "100",
+        "--only-discovery",
+    ]
+
+    findings = []
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=DALFOX_TIMEOUT + 15)
+
+        for line in result.stdout.strip().splitlines():
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+                vuln_type = obj.get("type", "")
+                poc = obj.get("proof_of_concept", obj.get("poc", ""))
+                param = obj.get("param", "")
+                inject_type = obj.get("inject_type", vuln_type)
+
+                severity = "high" if "stored" in inject_type.lower() else "high"
+
+                findings.append({
+                    "tool": "dalfox",
+                    "template_id": f"dalfox-xss-{param or 'unknown'}",
+                    "name": f"XSS ({inject_type}) em {target}",
+                    "severity": severity,
+                    "description": f"Dalfox detectou {inject_type} XSS no parametro '{param}'",
+                    "matched_at": poc or url,
+                    "proof": poc[:500] if poc else "",
+                    "references": ["https://owasp.org/www-community/attacks/xss/"],
+                    "port": 443,
+                    "tags": ["dalfox", "xss", inject_type.lower()],
+                })
+            except json.JSONDecodeError:
+                continue
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[VULN] dalfox timeout para %s", target)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug("[VULN] dalfox erro: %s", e)
+
+    if findings:
+        logger.info("[VULN] dalfox %s: %d XSS encontrados", target, len(findings))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# sqlmap — SQL injection scanner
+# ---------------------------------------------------------------------------
+def run_sqlmap_scan(host: str, hostname: str | None = None) -> list[dict]:
+    """Run sqlmap in non-intrusive mode to detect SQL injection."""
+    if not SQLMAP_ENABLED:
+        return []
+
+    import shutil
+    if not shutil.which("sqlmap"):
+        return []
+
+    target = hostname or host
+    url = f"https://{target}"
+    cmd = [
+        "sqlmap",
+        "-u", f"{url}/?id=1",
+        "--batch",
+        "--level=1",
+        "--risk=1",
+        "--timeout=10",
+        "--retries=1",
+        "--output-dir=/tmp/sqlmap-scanner",
+        "--disable-coloring",
+    ]
+
+    findings = []
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=SQLMAP_TIMEOUT + 15)
+        output = result.stdout
+
+        sqli_patterns = [
+            (r"(Parameter: .+? is vulnerable)", "high"),
+            (r"(Type: .+? injection)", "high"),
+            (r"(back-end DBMS: .+)", "high"),
+        ]
+
+        for pattern, severity in sqli_patterns:
+            import re
+            matches = re.findall(pattern, output, re.IGNORECASE)
+            for match in matches:
+                findings.append({
+                    "tool": "sqlmap",
+                    "template_id": f"sqlmap-sqli",
+                    "name": f"SQL Injection em {target}",
+                    "severity": severity,
+                    "description": match,
+                    "matched_at": url,
+                    "proof": match[:500],
+                    "references": ["https://owasp.org/www-community/attacks/SQL_Injection"],
+                    "port": 443,
+                    "tags": ["sqlmap", "sqli"],
+                })
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[VULN] sqlmap timeout para %s", target)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug("[VULN] sqlmap erro: %s", e)
+
+    if findings:
+        logger.info("[VULN] sqlmap %s: %d SQLi encontrados", target, len(findings))
+    return findings[:5]
+
+
+# ---------------------------------------------------------------------------
+# testssl.sh — SSL/TLS analysis
+# ---------------------------------------------------------------------------
+def run_testssl_scan(host: str, port: int = 443, hostname: str | None = None) -> list[dict]:
+    """Run testssl.sh for deep SSL/TLS vulnerability analysis."""
+    if not TESTSSL_ENABLED:
+        return []
+
+    import shutil
+    testssl_path = shutil.which("testssl") or shutil.which("testssl.sh")
+    if not testssl_path:
+        return []
+
+    target = hostname or host
+    cmd = [
+        testssl_path,
+        "--jsonfile", "/dev/stdout",
+        "--quiet",
+        "--fast",
+        "--sneaky",
+        "--warnings", "off",
+        f"{target}:{port}",
+    ]
+
+    findings = []
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=TESTSSL_TIMEOUT + 15)
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            data = []
+            for line in result.stdout.strip().splitlines():
+                try:
+                    data.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+        vuln_severities = {
+            "CRITICAL": "critical",
+            "HIGH": "high",
+            "MEDIUM": "medium",
+            "LOW": "low",
+            "WARN": "medium",
+            "OK": None,
+            "INFO": None,
+        }
+
+        for entry in (data if isinstance(data, list) else [data]):
+            sev_raw = str(entry.get("severity", "")).upper()
+            severity = vuln_severities.get(sev_raw)
+            if not severity:
+                continue
+            finding_id = entry.get("id", "unknown")
+            finding_text = entry.get("finding", "")
+            if not finding_text:
+                continue
+
+            findings.append({
+                "tool": "testssl",
+                "template_id": f"testssl-{finding_id}",
+                "name": f"SSL/TLS: {finding_id}",
+                "severity": severity,
+                "description": finding_text,
+                "matched_at": f"{target}:{port}",
+                "proof": finding_text[:500],
+                "references": [],
+                "port": port,
+                "tags": ["testssl", "ssl", "tls"],
+            })
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[VULN] testssl timeout para %s", target)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug("[VULN] testssl erro: %s", e)
+
+    if findings:
+        logger.info("[VULN] testssl %s: %d achados SSL/TLS", target, len(findings))
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# wafw00f — WAF detection
+# ---------------------------------------------------------------------------
+def run_wafw00f_scan(host: str, hostname: str | None = None) -> list[dict]:
+    """Run wafw00f to detect Web Application Firewalls."""
+    if not WAFW00F_ENABLED:
+        return []
+
+    import shutil
+    if not shutil.which("wafw00f"):
+        return []
+
+    target = hostname or host
+    url = f"https://{target}"
+    cmd = ["wafw00f", url, "-o", "-", "-f", "json"]
+
+    findings = []
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            data = []
+
+        for entry in (data if isinstance(data, list) else [data]):
+            detected = entry.get("detected", False)
+            waf_name = entry.get("firewall", entry.get("waf", ""))
+            if detected and waf_name:
+                findings.append({
+                    "tool": "wafw00f",
+                    "template_id": f"wafw00f-{waf_name.lower().replace(' ', '-')}",
+                    "name": f"WAF detectado: {waf_name}",
+                    "severity": "info",
+                    "description": f"WAF '{waf_name}' protege {target}",
+                    "matched_at": url,
+                    "proof": f"WAF: {waf_name}",
+                    "references": [],
+                    "port": 443,
+                    "tags": ["wafw00f", "waf", waf_name.lower()],
+                })
+
+    except subprocess.TimeoutExpired:
+        logger.warning("[VULN] wafw00f timeout para %s", target)
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.debug("[VULN] wafw00f erro: %s", e)
+
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Scan pipeline
 # ---------------------------------------------------------------------------
 def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | None = None) -> int:
@@ -332,7 +692,16 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | No
     nuclei_findings = run_nuclei_scan(target, ports, cves, hostname=hostname)
     nmap_findings = run_nmap_deep(ip, ports) if ip != hostname else []
 
-    all_findings = nuclei_findings + nmap_findings
+    http_ports = {80, 443, 8080, 8443, 8000, 3000, 5000, 9090}
+    has_web = bool(set(ports or []) & http_ports) or hostname
+
+    ffuf_findings = run_ffuf_scan(ip, ports, hostname) if has_web else []
+    dalfox_findings = run_dalfox_scan(ip, hostname) if has_web else []
+    sqlmap_findings = run_sqlmap_scan(ip, hostname) if has_web else []
+    testssl_findings = run_testssl_scan(ip, 443, hostname) if (443 in (ports or []) or hostname) else []
+    wafw00f_findings = run_wafw00f_scan(ip, hostname) if has_web else []
+
+    all_findings = nuclei_findings + nmap_findings + ffuf_findings + dalfox_findings + sqlmap_findings + testssl_findings + wafw00f_findings
     saved = 0
 
     if all_findings:
@@ -374,7 +743,19 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | No
     sev_str = " ".join(f"{k}:{v}" for k, v in sorted(sev_summary.items())) if sev_summary else "nenhuma"
 
     target_label = f"{hostname} ({ip})" if hostname else ip
-    logger.info("[VULN] %-30s  %d achados (%s)  nuclei:%d nmap:%d", target_label, saved, sev_str, len(nuclei_findings), len(nmap_findings))
+    extras = []
+    if ffuf_findings:
+        extras.append(f"ffuf:{len(ffuf_findings)}")
+    if dalfox_findings:
+        extras.append(f"dalfox:{len(dalfox_findings)}")
+    if sqlmap_findings:
+        extras.append(f"sqlmap:{len(sqlmap_findings)}")
+    if testssl_findings:
+        extras.append(f"testssl:{len(testssl_findings)}")
+    if wafw00f_findings:
+        extras.append(f"wafw00f:{len(wafw00f_findings)}")
+    extra_str = f" | {' '.join(extras)}" if extras else ""
+    logger.info("[VULN] %-30s  %d achados (%s)  nuclei:%d nmap:%d%s", target_label, saved, sev_str, len(nuclei_findings), len(nmap_findings), extra_str)
     return saved
 
 
