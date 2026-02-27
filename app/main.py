@@ -1013,6 +1013,78 @@ def api_bounty_submit_hackerone(program_id: str, body: dict | None = None):
     return {"report_id": report_id, "url": report_url, "ok": True}
 
 
+# ---------------------------------------------------------------------------
+# Submitted Reports (auto-submit history)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/bounty/submitted-reports")
+def api_submitted_reports(limit: int = 50):
+    """List submitted reports from auto-submit and manual submissions."""
+    from app.database import get_submitted_reports
+    col = get_submitted_reports()
+    docs = list(col.find().sort("timestamp", -1).limit(limit))
+    for d in docs:
+        d["id"] = str(d.pop("_id", ""))
+        if "program_id" in d:
+            d["program_id"] = str(d["program_id"])
+        if "target_id" in d:
+            d["target_id"] = str(d["target_id"])
+        if "timestamp" in d and hasattr(d["timestamp"], "isoformat"):
+            d["timestamp"] = d["timestamp"].isoformat()
+    return docs
+
+
+@app.get("/api/bounty/submitted-reports/stats")
+def api_submitted_reports_stats():
+    """Summary stats for submitted reports."""
+    from app.database import get_submitted_reports
+    col = get_submitted_reports()
+    docs = list(col.find())
+    total = len(docs)
+    submitted = sum(1 for d in docs if d.get("status") == "submitted")
+    errors = sum(1 for d in docs if d.get("status") == "error")
+    pending = sum(1 for d in docs if d.get("status") == "pending")
+    by_severity = {}
+    for d in docs:
+        s = d.get("severity", "medium")
+        by_severity[s] = by_severity.get(s, 0) + 1
+    return {
+        "total": total,
+        "submitted": submitted,
+        "errors": errors,
+        "pending": pending,
+        "by_severity": by_severity,
+    }
+
+
+@app.post("/api/bounty/targets/{target_id}/submit-h1")
+def api_submit_target_h1(target_id: str):
+    """Manually submit a single target to HackerOne."""
+    from app.database import get_bounty_targets, get_bounty_programs
+    from app.bounty import auto_submit_eligible_targets
+
+    try:
+        oid = ObjectId(target_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid target id")
+
+    targets_col = get_bounty_targets()
+    target = targets_col.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    program_id = target.get("program_id")
+    if not program_id:
+        raise HTTPException(status_code=400, detail="Target has no program_id")
+
+    results = auto_submit_eligible_targets(str(program_id))
+    target_results = [r for r in results if str(r.get("target_id", "")) == target_id]
+    if target_results:
+        r = target_results[0]
+        return {"ok": r.get("status") == "submitted", "status": r.get("status"), "h1_report_url": r.get("h1_report_url"), "error": r.get("error")}
+    return {"ok": False, "status": "skipped", "detail": "Target not eligible or already submitted"}
+
+
 @app.get("/api/hackerone/me")
 def api_hackerone_me():
     """Test HackerOne API credentials by listing programs."""

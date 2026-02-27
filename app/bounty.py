@@ -37,7 +37,7 @@ from urllib.parse import urlsplit, urlunsplit
 from bson import ObjectId
 import requests
 
-from app.database import get_bounty_programs, get_bounty_targets, get_vuln_results, get_bounty_changes
+from app.database import get_bounty_programs, get_bounty_targets, get_vuln_results, get_bounty_changes, get_submitted_reports
 from app.http_port_scanner_integration import run_http_port_scanner, HTTP_PORT_SCANNER_ENABLED
 from app.ip_feeds import (
     discover_asn_for_ip,
@@ -60,6 +60,11 @@ SUBFINDER_TIMEOUT = int(os.getenv("SUBFINDER_TIMEOUT", "300"))
 HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "300"))
 RECON_HTTP_TIMEOUT = int(os.getenv("RECON_HTTP_TIMEOUT", "8"))
 CRTSH_TIMEOUT = int(os.getenv("CRTSH_TIMEOUT", "30"))
+KATANA_TIMEOUT = int(os.getenv("KATANA_TIMEOUT", "120"))
+KATANA_DEPTH = int(os.getenv("KATANA_DEPTH", "3"))
+GAU_TIMEOUT = int(os.getenv("GAU_TIMEOUT", "60"))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 _recon_stats = {
     "recons_completed": 0,
@@ -898,6 +903,158 @@ def run_wayback_enum(domain: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Auto-queue bounty targets for Nuclei scan
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Katana — web crawler for endpoint discovery
+# ---------------------------------------------------------------------------
+
+def run_katana_crawl(urls: list[str], max_urls: int = 200) -> list[str]:
+    """Crawl alive hosts with katana to discover endpoints, JS files, forms."""
+    if not urls:
+        return []
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("\n".join(urls))
+            input_file = f.name
+
+        cmd = [
+            "katana", "-list", input_file,
+            "-depth", str(KATANA_DEPTH),
+            "-concurrency", "10",
+            "-parallelism", "5",
+            "-timeout", str(KATANA_TIMEOUT),
+            "-silent",
+            "-no-color",
+            "-jc",
+            "-kf", "all",
+            "-ef", "css,png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KATANA_TIMEOUT + 30)
+        found = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        os.unlink(input_file)
+        return found[:max_urls]
+    except FileNotFoundError:
+        logger.debug("[RECON] katana not installed, skipping")
+        return []
+    except Exception as e:
+        logger.warning("[RECON] katana error: %s", e)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# GAU — GetAllUrls from multiple sources
+# ---------------------------------------------------------------------------
+
+def run_gau(domain: str, max_urls: int = 300) -> list[str]:
+    """Fetch known URLs for a domain from Wayback, Common Crawl, OTX."""
+    try:
+        cmd = ["gau", "--threads", "3", "--timeout", str(GAU_TIMEOUT), "--subs", domain]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=GAU_TIMEOUT + 15)
+        urls = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        interesting = [u for u in urls if any(ext in u for ext in
+            [".js", ".json", ".xml", ".php", ".asp", ".jsp", ".env", ".config",
+             "api/", "admin", "login", "token", "key", "secret", "debug",
+             "graphql", "swagger", "?", "="])]
+        return interesting[:max_urls]
+    except FileNotFoundError:
+        logger.debug("[RECON] gau not installed, skipping")
+        return []
+    except Exception as e:
+        logger.warning("[RECON] gau error for %s: %s", domain, e)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# JS Secret Extraction (Python-based, no external tool needed)
+# ---------------------------------------------------------------------------
+
+_JS_SECRET_PATTERNS = [
+    (r'(?:api[_-]?key|apikey|api_secret)\s*[:=]\s*["\']([a-zA-Z0-9_\-]{16,})["\']', "API Key"),
+    (r'(?:access[_-]?token|auth[_-]?token|bearer)\s*[:=]\s*["\']([a-zA-Z0-9_\-\.]{20,})["\']', "Access Token"),
+    (r'(?:aws[_-]?access[_-]?key[_-]?id)\s*[:=]\s*["\']([A-Z0-9]{20})["\']', "AWS Access Key"),
+    (r'(?:aws[_-]?secret[_-]?access[_-]?key)\s*[:=]\s*["\']([a-zA-Z0-9/+=]{40})["\']', "AWS Secret Key"),
+    (r'(?:slack[_-]?(?:token|webhook))\s*[:=]\s*["\']([a-zA-Z0-9\-_/]{20,})["\']', "Slack Token"),
+    (r'(?:firebase|google)[_-]?(?:api[_-]?key)\s*[:=]\s*["\']([a-zA-Z0-9_\-]{30,})["\']', "Google/Firebase Key"),
+    (r'(?:stripe[_-]?(?:sk|pk|key))\s*[:=]\s*["\']([a-zA-Z0-9_\-]{20,})["\']', "Stripe Key"),
+    (r'(?:gh[pousr]_[a-zA-Z0-9]{36,})', "GitHub Token"),
+    (r'(?:-----BEGIN (?:RSA |EC )?PRIVATE KEY-----)', "Private Key"),
+    (r'(?:mongodb(?:\+srv)?://[^\s"\']+)', "MongoDB URI"),
+    (r'(?:postgres(?:ql)?://[^\s"\']+)', "PostgreSQL URI"),
+    (r'(?:mysql://[^\s"\']+)', "MySQL URI"),
+    (r'(?:redis://[^\s"\']+)', "Redis URI"),
+]
+
+
+def extract_js_secrets_from_urls(urls: list[str], max_check: int = 30) -> list[dict]:
+    """Download JS files and extract secrets/sensitive data."""
+    js_urls = [u for u in urls if ".js" in u and not any(x in u for x in [".json", "jquery", "bootstrap", "react.", "vue.", "angular."])][:max_check]
+    findings = []
+    for url in js_urls:
+        try:
+            resp = requests.get(url, timeout=8, headers={"User-Agent": "ScannerRecon/1.0"})
+            if resp.status_code != 200 or len(resp.text) < 50:
+                continue
+            body = resp.text[:50000]
+            for pattern, label in _JS_SECRET_PATTERNS:
+                matches = re.findall(pattern, body, re.IGNORECASE)
+                for match in matches[:3]:
+                    val = match if isinstance(match, str) else match[0] if match else ""
+                    if len(val) > 8:
+                        findings.append({
+                            "severity": "high",
+                            "code": "js_secret_leak",
+                            "title": f"{label} exposed in JS",
+                            "evidence": f"{url} → {val[:30]}...",
+                        })
+        except Exception:
+            continue
+    return findings
+
+
+# ---------------------------------------------------------------------------
+# Telegram notifications
+# ---------------------------------------------------------------------------
+
+def send_telegram_alert(message: str) -> bool:
+    """Send alert via Telegram bot."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "Markdown",
+            "disable_web_page_preview": True,
+        }, timeout=10)
+        return True
+    except Exception as e:
+        logger.warning("[TELEGRAM] send error: %s", e)
+        return False
+
+
+def notify_findings(program_name: str, domain: str, findings: list[dict], h1_url: str = "") -> None:
+    """Send Telegram alert for critical/high findings."""
+    critical = [f for f in findings if f.get("severity") == "critical"]
+    high = [f for f in findings if f.get("severity") == "high"]
+    if not critical and not high:
+        return
+
+    lines = [f"🚨 *{program_name}* — `{domain}`"]
+    if critical:
+        lines.append(f"🔴 *{len(critical)} CRITICAL*")
+        for f in critical[:3]:
+            lines.append(f"  • {f.get('title', '?')}")
+    if high:
+        lines.append(f"🟠 *{len(high)} HIGH*")
+        for f in high[:3]:
+            lines.append(f"  • {f.get('title', '?')}")
+    total = len(findings)
+    lines.append(f"📊 Total: {total} findings")
+    if h1_url:
+        lines.append(f"🔗 [HackerOne]({h1_url})")
+    send_telegram_alert("\n".join(lines))
+
+
 def _auto_queue_bounty_targets_for_nuclei() -> int:
     """Enqueue alive bounty targets with findings for Nuclei/Nmap scan."""
     try:
@@ -1190,8 +1347,44 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         else:
             logger.info("[RECON] [12/15] GitHub Dorking: desabilitado (sem GITHUB_TOKEN)")
 
+        # --- Etapa 12b: Katana crawl on alive hosts ---
+        katana_urls: list[str] = []
+        if alive_hosts:
+            logger.info("[RECON] [12b/18] Katana crawl: %d alive hosts...", len(alive_hosts))
+            t0 = time.time()
+            crawl_targets = []
+            for host in sorted(alive_hosts)[:20]:
+                hd = httpx_by_host.get(host)
+                if hd and hd.get("url"):
+                    crawl_targets.append(hd["url"])
+                else:
+                    crawl_targets.append(f"https://{host}")
+            katana_urls = run_katana_crawl(crawl_targets)
+            logger.info("[RECON] [12b/18] Katana: %d endpoints descobertos em %.1fs",
+                         len(katana_urls), time.time() - t0)
+
+        # --- Etapa 12c: GAU — GetAllUrls ---
+        gau_urls: list[str] = []
+        logger.info("[RECON] [12c/18] GAU: buscando URLs conhecidas...")
+        t0 = time.time()
+        for domain in root_domains[:3]:
+            gau_result = run_gau(domain)
+            gau_urls.extend(gau_result)
+        logger.info("[RECON] [12c/18] GAU: %d URLs interessantes em %.1fs",
+                     len(gau_urls), time.time() - t0)
+
+        # --- Etapa 12d: JS Secret Extraction ---
+        all_discovered_urls = katana_urls + gau_urls
+        js_secrets: list[dict] = []
+        if all_discovered_urls:
+            logger.info("[RECON] [12d/18] JS Secrets: analisando %d URLs...", len(all_discovered_urls))
+            t0 = time.time()
+            js_secrets = extract_js_secrets_from_urls(all_discovered_urls)
+            logger.info("[RECON] [12d/18] JS Secrets: %d leaks encontrados em %.1fs",
+                         len(js_secrets), time.time() - t0)
+
         # --- Etapa 13: Change detection ---
-        logger.info("[RECON] [13/15] Change detection...")
+        logger.info("[RECON] [13/18] Change detection...")
         changes = _detect_and_save_changes(oid, prog_name, set(scoped), previous_subdomains)
 
         # --- Etapa 14: Save to MongoDB ---
@@ -1207,8 +1400,8 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             http_scanner = http_scanner_by_host.get(sub, [])
             is_new = sub in changes.get("new_subdomains", [])
 
-            # Inject zone transfer + github findings into recon_checks
-            extra_findings = list(zone_transfer_findings) + list(github_findings)
+            # Inject zone transfer + github + JS secret findings into recon_checks
+            extra_findings = list(zone_transfer_findings) + list(github_findings) + list(js_secrets)
             if extra_findings and is_alive:
                 if not isinstance(recon_checks.get("findings"), list):
                     recon_checks["findings"] = []
@@ -1232,6 +1425,9 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                     ps_for_sub = ps
                     break
 
+            # Katana + GAU URLs for this subdomain
+            crawled_for_sub = [u for u in katana_urls + gau_urls if sub in u][:30]
+
             targets_col.update_one(
                 {"program_id": oid, "domain": sub},
                 {
@@ -1245,6 +1441,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                         "recon_checks": recon_checks,
                         "http_scanner": http_scanner,
                         "wayback_urls": wb_for_sub[:20],
+                        "crawled_urls": crawled_for_sub,
                         "paramspider": ps_for_sub,
                         "is_new": is_new,
                         "last_recon": now,
@@ -1259,6 +1456,26 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         logger.info("[RECON] [15/15] Nuclei auto-queue...")
         nuclei_queued = _auto_queue_bounty_targets_for_nuclei()
         logger.info("[RECON] [15/15] %d targets enfileirados para Nuclei", nuclei_queued)
+
+        # --- Etapa 16: Auto-submit eligible to HackerOne ---
+        h1_submitted = []
+        if AUTO_SUBMIT_H1 and "hackerone.com" in (program.get("url") or ""):
+            logger.info("[RECON] [16/16] Auto-submit H1...")
+            try:
+                h1_submitted = auto_submit_eligible_targets(program_id)
+                logger.info("[RECON] [16/16] %d reports submetidos ao HackerOne", len(h1_submitted))
+            except Exception as e:
+                logger.warning("[RECON] [16/16] Auto-submit erro: %s", e)
+
+        # --- Etapa 17: Telegram notifications ---
+        if TELEGRAM_BOT_TOKEN:
+            for sub in scoped:
+                if sub not in alive_hosts:
+                    continue
+                rc = recon_checks_by_host.get(sub, {})
+                findings = rc.get("findings", [])
+                if findings:
+                    notify_findings(prog_name, sub, findings, program.get("url", ""))
 
         _inc_stat("subdomains_found", len(scoped))
         _inc_stat("hosts_alive", len(alive_hosts))
@@ -1298,6 +1515,10 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             "rdns_discoveries": len(rdns_new_subs),
             "wayback_urls": total_wb,
             "nuclei_queued": nuclei_queued,
+            "katana_urls": len(katana_urls),
+            "gau_urls": len(gau_urls),
+            "js_secrets": len(js_secrets),
+            "h1_submitted": len(h1_submitted),
             "new_subdomains": changes.get("total_new", 0),
             "removed_subdomains": changes.get("total_removed", 0),
         }
@@ -1315,6 +1536,187 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         }})
         logger.error("[BOUNTY] Recon falhou em '%s': %s", program.get("name", "?"), e)
         raise
+
+
+# ---------------------------------------------------------------------------
+# Auto-submit eligible targets to HackerOne
+# ---------------------------------------------------------------------------
+
+AUTO_SUBMIT_H1 = os.getenv("AUTO_SUBMIT_H1", "true").lower() in ("1", "true", "yes")
+
+
+def _build_h1_report_body(program: dict, target: dict) -> dict:
+    """Build a HackerOne report payload from a target with findings."""
+    findings = target.get("recon_checks", {}).get("findings", [])
+    domain = target.get("domain", "?")
+    url = (target.get("httpx") or {}).get("url") or f"https://{domain}"
+    ips = ", ".join(target.get("ips", [])) or "-"
+
+    sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    severity = "medium"
+    for f in findings:
+        s = (f.get("severity") or "").lower()
+        if s and sev_order.get(s, 99) < sev_order.get(severity, 99):
+            severity = s
+
+    first = findings[0] if findings else None
+    title = f"{first['title']} on {domain}" if first else f"Security findings on {domain}"
+
+    desc_parts = [
+        f"During reconnaissance of program **{program.get('name', '?')}**, the asset `{domain}` ({url}) was analyzed.",
+        f"The following {len(findings)} issue(s) were identified:",
+        "",
+    ]
+    for f in findings:
+        desc_parts.append(f"- **[{(f.get('severity','').upper())}]** {f.get('title','?')}")
+        if f.get("evidence"):
+            desc_parts.append(f"  Evidence: `{f['evidence']}`")
+    desc_parts += ["", "## Asset", f"- Domain: {domain}", f"- IPs: {ips}", f"- URL: {url}",
+                   f"- HTTP Status: {(target.get('httpx') or {}).get('status_code', '-')}"]
+
+    steps = [f"1. Navigate to {url}"]
+    for i, f in enumerate(findings, 2):
+        ev = f" (evidence: {f['evidence']})" if f.get("evidence") else ""
+        steps.append(f"{i}. Observe: {f.get('title', '?')}{ev}")
+
+    impact_map = {
+        "critical": "Critical risk: possible severe compromise of the system or sensitive data.",
+        "high": "High impact: data exposure or misconfiguration that facilitates attacks.",
+        "medium": "Medium impact: misconfiguration or information leak that should be remediated.",
+        "low": "Low impact: security improvement recommended.",
+    }
+    impact = impact_map.get(severity, impact_map["medium"])
+
+    vuln_info = "\n".join(desc_parts) + "\n\n## Steps to Reproduce\n" + "\n".join(steps)
+
+    return {
+        "title": title[:250],
+        "vulnerability_information": vuln_info,
+        "impact": impact,
+        "severity_rating": severity,
+    }
+
+
+def auto_submit_eligible_targets(program_id: str) -> list[dict]:
+    """Find eligible targets for a H1 program and auto-submit reports.
+
+    A target is eligible if: alive, recon_checks.checked, total_findings > 0,
+    and not already submitted (checked via submitted_reports collection).
+    """
+    if not AUTO_SUBMIT_H1:
+        return []
+
+    username = (os.getenv("HACKERONE_API_USERNAME") or "").strip()
+    token = (os.getenv("HACKERONE_API_TOKEN") or "").strip()
+    if not username or not token:
+        return []
+
+    try:
+        oid = ObjectId(program_id)
+    except Exception:
+        return []
+
+    programs_col = get_bounty_programs()
+    targets_col = get_bounty_targets()
+    reports_col = get_submitted_reports()
+
+    program = programs_col.find_one({"_id": oid})
+    if not program:
+        return []
+
+    program_url = (program.get("url") or "").strip()
+    if "hackerone.com" not in program_url:
+        return []
+
+    from urllib.parse import urlsplit
+    path = urlsplit(program_url).path.strip("/")
+    parts = [p for p in path.split("/") if p]
+    handle = parts[0] if parts else None
+    if not handle:
+        return []
+
+    already_submitted = set()
+    for r in reports_col.find({"program_id": oid}):
+        already_submitted.add(str(r.get("target_id", "")))
+
+    targets = list(targets_col.find({"program_id": oid}))
+    eligible = []
+    for t in targets:
+        if not t.get("alive"):
+            continue
+        rc = t.get("recon_checks") or {}
+        if not rc.get("checked"):
+            continue
+        if (rc.get("total_findings") or 0) <= 0:
+            continue
+        tid = str(t.get("_id", ""))
+        if tid in already_submitted:
+            continue
+        eligible.append(t)
+
+    results = []
+    for t in eligible:
+        body = _build_h1_report_body(program, t)
+        payload = {
+            "data": {
+                "type": "report",
+                "attributes": {
+                    "team_handle": handle,
+                    "title": body["title"],
+                    "vulnerability_information": body["vulnerability_information"],
+                    "severity_rating": body["severity_rating"],
+                    "impact": body["impact"],
+                },
+            },
+        }
+
+        report_record = {
+            "program_id": oid,
+            "program_name": program.get("name", "?"),
+            "target_id": t.get("_id"),
+            "domain": t.get("domain", "?"),
+            "severity": body["severity_rating"],
+            "findings_count": len((t.get("recon_checks") or {}).get("findings", [])),
+            "title": body["title"],
+            "timestamp": datetime.utcnow(),
+            "status": "pending",
+            "h1_report_id": None,
+            "h1_report_url": None,
+            "error": None,
+            "report_body": body["vulnerability_information"][:2000],
+        }
+
+        try:
+            r = requests.post(
+                "https://api.hackerone.com/v1/hackers/reports",
+                auth=(username, token),
+                json=payload,
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=30,
+            )
+            if r.status_code in (200, 201):
+                data = r.json() or {}
+                rid = (data.get("data") or {}).get("id")
+                attrs = (data.get("data") or {}).get("attributes") or {}
+                rurl = attrs.get("url") or (f"https://hackerone.com/reports/{rid}" if rid else "")
+                report_record["status"] = "submitted"
+                report_record["h1_report_id"] = rid
+                report_record["h1_report_url"] = rurl
+                logger.info("[H1-AUTO] Submitted: %s → %s (report %s)", t.get("domain"), program.get("name"), rid)
+            else:
+                err = r.text[:300]
+                report_record["status"] = "error"
+                report_record["error"] = err
+                logger.warning("[H1-AUTO] Failed %s: %s", t.get("domain"), err)
+        except Exception as e:
+            report_record["status"] = "error"
+            report_record["error"] = str(e)[:300]
+            logger.warning("[H1-AUTO] Exception %s: %s", t.get("domain"), e)
+
+        reports_col.insert_one(report_record)
+        results.append(report_record)
+
+    return results
 
 
 # ---------------------------------------------------------------------------

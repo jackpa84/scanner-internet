@@ -454,3 +454,44 @@ export const fetchRecentChanges = (limit = 50) =>
 
 export const fetchNewTargets = (limit = 100) =>
   apiFetch<BountyTarget[]>(`/api/bounty/targets/new?limit=${limit}`);
+
+// ---------------------------------------------------------------------------
+// Submitted Reports (auto-submit to HackerOne)
+// ---------------------------------------------------------------------------
+
+export interface SubmittedReport {
+  id: string;
+  program_id: string;
+  program_name: string;
+  target_id: string;
+  domain: string;
+  severity: string;
+  findings_count: number;
+  title: string;
+  timestamp: string;
+  status: "submitted" | "error" | "pending";
+  h1_report_id?: string | number | null;
+  h1_report_url?: string | null;
+  error?: string | null;
+  report_body?: string;
+}
+
+export interface SubmittedReportsStats {
+  total: number;
+  submitted: number;
+  errors: number;
+  pending: number;
+  by_severity: Record<string, number>;
+}
+
+export const fetchSubmittedReports = (limit = 50) =>
+  apiFetch<SubmittedReport[]>(`/api/bounty/submitted-reports?limit=${limit}`);
+
+export const fetchSubmittedReportsStats = () =>
+  apiFetch<SubmittedReportsStats>("/api/bounty/submitted-reports/stats");
+
+export const submitTargetToH1 = (targetId: string) =>
+  API_POST<{ ok: boolean; status: string; h1_report_url?: string; error?: string }>(
+    `/api/bounty/targets/${targetId}/submit-h1`,
+    {}
+  );

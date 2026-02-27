@@ -72,6 +72,10 @@ def get_bounty_changes():
     )
 
 
+def get_submitted_reports():
+    return RedisCollection(get_redis(), "submitted_reports", max_docs=500)
+
+
 # ── init ────────────────────────────────────────────────────────
 
 def init_db():
@@ -140,6 +144,12 @@ def init_db():
     ccol = get_bounty_changes()
     ccol.create_index("program_id", name="cidx_program")
     ccol.create_index("timestamp", name="cidx_timestamp")
+
+    rcol = get_submitted_reports()
+    rcol.create_index("program_id", name="ridx_program")
+    rcol.create_index("target_id", name="ridx_target")
+    rcol.create_index("timestamp", name="ridx_timestamp")
+    rcol.create_index("status", name="ridx_status")
 
     logger.info(
         "[DB] Storage ready: Redis primary | MongoDB %s",

@@ -1,6 +1,8 @@
+# Otimizado para MacBook Pro M4 (12+ cores, 24+ GB RAM, Apple Silicon)
 services:
   worker:
     build: .
+    platform: linux/arm64
     cap_add:
       - NET_RAW
       - NET_ADMIN
@@ -8,11 +10,18 @@ services:
       - "host.docker.internal:host-gateway"
     ulimits:
       nofile:
-        soft: 65536
-        hard: 65536
+        soft: 262144
+        hard: 262144
+      nproc:
+        soft: 131072
+        hard: 131072
     sysctls:
-      - net.core.somaxconn=65535
       - net.ipv4.tcp_tw_reuse=1
+      - net.ipv4.ip_local_port_range=1024 65535
+      - net.ipv4.tcp_fin_timeout=10
+      - net.ipv4.tcp_keepalive_time=120
+      - net.ipv4.tcp_keepalive_intvl=10
+      - net.ipv4.tcp_keepalive_probes=3
     env_file:
       - .env
     environment:
@@ -21,36 +30,54 @@ services:
 
       AUTH_USERNAME: "admin"
       AUTH_PASSWORD: "scanner2026"
-      LOG_LEVEL: "INFO"
+      LOG_LEVEL: "WARNING"
       PYTHONUNBUFFERED: "1"
+      PYTHONOPTIMIZE: "2"
+      PYTHONDONTWRITEBYTECODE: "1"
+      MALLOC_ARENA_MAX: "2"
+      UV_THREADPOOL_SIZE: "16"
 
       NETWORK_SCANNER_ENABLED: "false"
       NUM_WORKERS: "0"
+      FEED_ENABLED: "false"
 
-      # Bounty recon (core do worker)
+      # Bounty recon — M4 aguenta muitos workers
       BOUNTY_MODE: "true"
-      BOUNTY_RECON_INTERVAL: "7200"
-      BOUNTY_RECON_WORKERS: "5"
-      SUBFINDER_TIMEOUT: "300"
-      HTTPX_TIMEOUT: "300"
+      BOUNTY_RECON_INTERVAL: "1800"
+      BOUNTY_RECON_WORKERS: "16"
+      SUBFINDER_TIMEOUT: "120"
+      HTTPX_TIMEOUT: "120"
+      HTTPX_THREADS: "100"
 
-      # Vuln scanner
-      VULN_WORKERS: "4"
+      # Vuln scanner — agressivo no M4
+      VULN_WORKERS: "12"
       VULN_AUTO_SCAN: "true"
-      VULN_AUTO_MIN_SCORE: "50"
+      VULN_AUTO_MIN_SCORE: "30"
       NUCLEI_SEVERITY: "critical,high,medium"
-      NUCLEI_TIMEOUT: "120"
-      NMAP_TIMEOUT: "180"
+      NUCLEI_TIMEOUT: "60"
+      NUCLEI_RATE_LIMIT: "500"
+      NUCLEI_BULK_SIZE: "100"
+      NUCLEI_CONCURRENCY: "50"
+      NMAP_TIMEOUT: "90"
 
-      # Rate limits (compartilha APIs com main)
-      SHODAN_RPS: "5"
-      IPAPI_RPS: "0.5"
-      IPINFO_RPS: "0.5"
-      PRESCAN_TIMEOUT: "0.8"
+      # Rate limits por replica (5 replicas × valor = total)
+      SHODAN_RPS: "2"
+      IPAPI_RPS: "0.2"
+      IPINFO_RPS: "0.2"
+      PRESCAN_TIMEOUT: "0.3"
 
       MASSCAN_ENABLED: "false"
       ABUSEIPDB_KEY: ""
       IPINFO_TOKEN: ""
+
+      # --- New tools ---
+      KATANA_TIMEOUT: "90"
+      KATANA_DEPTH: "3"
+      GAU_TIMEOUT: "45"
+
+      # --- Telegram alerts ---
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
 
       # HackerOne
       HACKERONE_API_USERNAME: "${HACKERONE_API_USERNAME:-}"
@@ -61,22 +88,47 @@ services:
       HTTP_PORT_SCANNER_ENABLED: "true"
       HTTP_PORT_SCANNER_PATH: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
 
+      # Uvicorn — minimo, worker nao serve UI
+      WEB_CONCURRENCY: "1"
+
     networks:
       - scanner_net
     restart: unless-stopped
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000", "--log-level", "info"]
+    command:
+      - uvicorn
+      - app.main:app
+      - --host=0.0.0.0
+      - --port=5000
+      - --log-level=warning
+      - --timeout-keep-alive=30
+      - --limit-concurrency=200
+      - --backlog=4096
+      - --no-access-log
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "5"
+        max-size: "5m"
+        max-file: "2"
     deploy:
-      replicas: 3
+      replicas: 5
       resources:
         limits:
-          memory: 2g
+          cpus: "3.0"
+          memory: 4g
         reservations:
-          memory: 512m
+          cpus: "1.0"
+          memory: 1g
+      restart_policy:
+        condition: on-failure
+        delay: 3s
+        max_attempts: 10
+        window: 120s
 
 networks:
   scanner_net:

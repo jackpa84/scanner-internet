@@ -4,6 +4,7 @@ import { Component, type ReactNode, useEffect, useState, useCallback } from "rea
 import BountyPanel from "@/components/BountyPanel";
 import VulnPanel from "@/components/VulnPanel";
 import EligibleReportsPanel from "@/components/EligibleReportsPanel";
+import SubmittedReportsPanel from "@/components/SubmittedReportsPanel";
 import Modal from "@/components/Modal";
 import {
   fetchHealth,
@@ -318,6 +319,78 @@ function DashboardHeader() {
             <span className="text-emerald-400">{scanCompleted} ok</span>
           </div>
         </DashboardCard>
+
+        {/* ── Recon Tools ── */}
+        <DashboardCard
+          title="Recon Tools"
+          accent="text-pink-400"
+          onClick={() => setDetailModal("tools")}
+          graphic={
+            <div className="w-16 h-16 flex items-center justify-center rounded-xl bg-pink-500/10 text-pink-400">
+              <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17l-5.1-5.1M11.42 15.17l2.25 2.25M14.5 8l-5 5M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25z" />
+              </svg>
+            </div>
+          }
+        >
+          <div className="text-lg font-bold text-[var(--foreground)]">Pipeline Ativo</div>
+          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm">
+            <span className="text-cyan-400">subfinder</span>
+            <span className="text-cyan-400">httpx</span>
+            <span className="text-pink-400">katana</span>
+            <span className="text-pink-400">gau</span>
+            <span className="text-violet-400">nuclei</span>
+            <span className="text-violet-400">nmap</span>
+            <span className="text-amber-400">dnsx</span>
+            <span className="text-emerald-400">crt.sh</span>
+          </div>
+        </DashboardCard>
+
+        {/* ── JS Secrets ── */}
+        <DashboardCard
+          title="JS Secrets"
+          accent="text-red-400"
+          onClick={() => setDetailModal("tools")}
+          graphic={
+            <div className="w-16 h-16 flex items-center justify-center rounded-xl bg-red-500/10 text-red-400">
+              <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 5.25a3 3 0 013 3m3 0a6 6 0 01-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1121.75 8.25z" />
+              </svg>
+            </div>
+          }
+        >
+          <div className="text-lg font-bold text-[var(--foreground)]">Deteccao de Secrets</div>
+          <div className="space-y-1 text-sm">
+            <span className="text-red-400">API Keys, Tokens, AWS Keys</span>
+            <br />
+            <span className="text-amber-400">DB URIs, Private Keys</span>
+            <br />
+            <span className="text-[var(--muted)]">14 patterns em JS files</span>
+          </div>
+        </DashboardCard>
+
+        {/* ── Telegram ── */}
+        <DashboardCard
+          title="Telegram Alerts"
+          accent="text-sky-400"
+          onClick={() => setDetailModal("tools")}
+          graphic={
+            <div className="w-16 h-16 flex items-center justify-center rounded-xl bg-sky-500/10 text-sky-400">
+              <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+              </svg>
+            </div>
+          }
+        >
+          <div className="text-lg font-bold text-[var(--foreground)]">Notificacoes</div>
+          <div className="space-y-1 text-sm">
+            <span className="text-red-400">Critical → alerta imediato</span>
+            <br />
+            <span className="text-orange-400">High → alerta imediato</span>
+            <br />
+            <span className="text-[var(--muted)]">Via Telegram Bot</span>
+          </div>
+        </DashboardCard>
       </div>
 
 
@@ -498,6 +571,120 @@ function DashboardHeader() {
           )}
         </div>
       </Modal>
+
+      <Modal open={detailModal === "tools"} onClose={() => setDetailModal(null)} title="Ferramentas de Recon & Scan">
+        <div className="space-y-6">
+          {/* Recon tools */}
+          <div>
+            <h3 className="text-lg font-bold text-[var(--foreground)] mb-3">Subdomain Enumeration</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                { name: "subfinder", desc: "Enumeracao passiva de subdomínios", color: "text-cyan-400", bg: "bg-cyan-500/10 border-cyan-500/20" },
+                { name: "crt.sh", desc: "Certificate Transparency logs", color: "text-sky-400", bg: "bg-sky-500/10 border-sky-500/20" },
+                { name: "AlienVault", desc: "Passive DNS via OTX API", color: "text-violet-400", bg: "bg-violet-500/10 border-violet-500/20" },
+                { name: "RapidDNS", desc: "Servico de enumeracao", color: "text-purple-400", bg: "bg-purple-500/10 border-purple-500/20" },
+                { name: "Anubis", desc: "Subdomain discovery", color: "text-indigo-400", bg: "bg-indigo-500/10 border-indigo-500/20" },
+                { name: "Wayback", desc: "Subdomínios historicos", color: "text-amber-400", bg: "bg-amber-500/10 border-amber-500/20" },
+                { name: "dnsx", desc: "Resolucao DNS massiva", color: "text-teal-400", bg: "bg-teal-500/10 border-teal-500/20" },
+              ].map(t => (
+                <div key={t.name} className={`rounded-xl border ${t.bg} p-3`}>
+                  <div className={`text-base font-bold ${t.color}`}>{t.name}</div>
+                  <div className="text-sm text-[var(--muted)]">{t.desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Crawling & URL discovery */}
+          <div>
+            <h3 className="text-lg font-bold text-[var(--foreground)] mb-3">Crawling & URL Discovery</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                { name: "katana", desc: "Web crawler: endpoints, JS, forms", color: "text-pink-400", bg: "bg-pink-500/10 border-pink-500/20" },
+                { name: "gau", desc: "URLs de Wayback + CommonCrawl + OTX", color: "text-rose-400", bg: "bg-rose-500/10 border-rose-500/20" },
+                { name: "httpx", desc: "HTTP probe + fingerprint", color: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20" },
+                { name: "ParamSpider", desc: "Parametros de URL via arquivos", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
+              ].map(t => (
+                <div key={t.name} className={`rounded-xl border ${t.bg} p-3`}>
+                  <div className={`text-base font-bold ${t.color}`}>{t.name}</div>
+                  <div className="text-sm text-[var(--muted)]">{t.desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Vulnerability scanning */}
+          <div>
+            <h3 className="text-lg font-bold text-[var(--foreground)] mb-3">Vulnerability Scanning</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                { name: "nuclei", desc: "Scanner de vulns com templates", color: "text-violet-400", bg: "bg-violet-500/10 border-violet-500/20" },
+                { name: "nmap NSE", desc: "Scripts de vuln e auth", color: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/20" },
+                { name: "ffuf", desc: "Directory/path fuzzing", color: "text-lime-400", bg: "bg-lime-500/10 border-lime-500/20" },
+                { name: "dalfox", desc: "XSS scanner", color: "text-red-400", bg: "bg-red-500/10 border-red-500/20" },
+                { name: "testssl.sh", desc: "Analise SSL/TLS", color: "text-yellow-400", bg: "bg-yellow-500/10 border-yellow-500/20" },
+                { name: "wafw00f", desc: "WAF detection", color: "text-slate-400", bg: "bg-slate-500/10 border-slate-500/20" },
+              ].map(t => (
+                <div key={t.name} className={`rounded-xl border ${t.bg} p-3`}>
+                  <div className={`text-base font-bold ${t.color}`}>{t.name}</div>
+                  <div className="text-sm text-[var(--muted)]">{t.desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Secret detection */}
+          <div>
+            <h3 className="text-lg font-bold text-[var(--foreground)] mb-3">Secret Detection & Intel</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {[
+                { name: "JS Secrets", desc: "API keys, tokens, URIs em JS", color: "text-red-400", bg: "bg-red-500/10 border-red-500/20" },
+                { name: "GitHub Dorking", desc: "Secrets vazados em repos", color: "text-slate-300", bg: "bg-slate-500/10 border-slate-500/20" },
+                { name: "Shodan", desc: "Enrichment de IPs", color: "text-orange-400", bg: "bg-orange-500/10 border-orange-500/20" },
+                { name: "ThreatFox", desc: "IOC / malware detection", color: "text-rose-400", bg: "bg-rose-500/10 border-rose-500/20" },
+              ].map(t => (
+                <div key={t.name} className={`rounded-xl border ${t.bg} p-3`}>
+                  <div className={`text-base font-bold ${t.color}`}>{t.name}</div>
+                  <div className="text-sm text-[var(--muted)]">{t.desc}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Security checks */}
+          <div>
+            <h3 className="text-lg font-bold text-[var(--foreground)] mb-3">40+ Security Checks</h3>
+            <div className="flex flex-wrap gap-2">
+              {[
+                "CORS", "SSTI", "CRLF", "Host Header", "JWT", "S3 Buckets",
+                "Subdomain Takeover", "Zone Transfer", "Missing Headers",
+                ".git exposed", ".env exposed", "phpMyAdmin", "Jenkins",
+                "Swagger/OpenAPI", "GraphQL", "Debug endpoints",
+                "Directory listing", "Server-status", "Actuator",
+              ].map(c => (
+                <span key={c} className="rounded-lg bg-[var(--background)] border border-[var(--border)] px-3 py-1.5 text-sm text-[var(--foreground)]">{c}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* Notifications */}
+          <div>
+            <h3 className="text-lg font-bold text-[var(--foreground)] mb-3">Notificacoes</h3>
+            <div className="rounded-xl bg-sky-500/10 border border-sky-500/20 p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <svg className="w-6 h-6 text-sky-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                </svg>
+                <span className="text-base font-bold text-sky-400">Telegram Bot</span>
+              </div>
+              <p className="text-base text-[var(--muted)]">
+                Alertas em tempo real no celular para findings Critical e High.
+                Configure <code className="text-sky-300">TELEGRAM_BOT_TOKEN</code> e <code className="text-sky-300">TELEGRAM_CHAT_ID</code> no .env
+              </p>
+            </div>
+          </div>
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -566,8 +753,14 @@ function StatsPanel() {
 export default function Home() {
   return (
     <div className="flex flex-col h-full">
-      {/* Topo: Stats */}
-      <div className="mb-8">
+      {/* Topo: Reports H1 + Elegiveis + Stats */}
+      <div className="mb-8 space-y-4">
+        <ErrorBoundary>
+          <SubmittedReportsPanel />
+        </ErrorBoundary>
+        <ErrorBoundary>
+          <EligibleReportsPanel />
+        </ErrorBoundary>
         <ErrorBoundary>
           <StatsPanel />
         </ErrorBoundary>
@@ -581,9 +774,6 @@ export default function Home() {
         </ErrorBoundary>
 
         <div className="xl:border-l xl:border-[var(--border)] xl:pl-8 space-y-6">
-          <ErrorBoundary>
-            <EligibleReportsPanel />
-          </ErrorBoundary>
           <ErrorBoundary>
             <VulnPanel />
           </ErrorBoundary>

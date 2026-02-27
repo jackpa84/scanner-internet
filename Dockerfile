@@ -42,6 +42,30 @@ RUN apt-get update \
     && unzip -o /tmp/httpx.zip -d /usr/local/bin/ \
     && chmod +x /usr/local/bin/httpx \
     && rm /tmp/httpx.zip \
+    # --- katana (web crawler) ---
+    && KATANA_VERSION=$(wget -qO- "https://api.github.com/repos/projectdiscovery/katana/releases/latest" \
+       | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
+    && wget -q "https://github.com/projectdiscovery/katana/releases/download/${KATANA_VERSION}/katana_${KATANA_VERSION#v}_linux_${TARGETARCH}.zip" \
+       -O /tmp/katana.zip \
+    && unzip -o /tmp/katana.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/katana \
+    && rm /tmp/katana.zip \
+    # --- dnsx (DNS toolkit) ---
+    && DNSX_VERSION=$(wget -qO- "https://api.github.com/repos/projectdiscovery/dnsx/releases/latest" \
+       | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
+    && wget -q "https://github.com/projectdiscovery/dnsx/releases/download/${DNSX_VERSION}/dnsx_${DNSX_VERSION#v}_linux_${TARGETARCH}.zip" \
+       -O /tmp/dnsx.zip \
+    && unzip -o /tmp/dnsx.zip -d /usr/local/bin/ \
+    && chmod +x /usr/local/bin/dnsx \
+    && rm /tmp/dnsx.zip \
+    # --- gau (GetAllUrls) ---
+    && GAU_VERSION=$(wget -qO- "https://api.github.com/repos/lc/gau/releases/latest" \
+       | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
+    && wget -q "https://github.com/lc/gau/releases/download/${GAU_VERSION}/gau_${GAU_VERSION#v}_linux_${TARGETARCH}.tar.gz" \
+       -O /tmp/gau.tar.gz \
+    && tar -xzf /tmp/gau.tar.gz -C /usr/local/bin/ gau \
+    && chmod +x /usr/local/bin/gau \
+    && rm /tmp/gau.tar.gz \
     && apt-get purge -y wget unzip \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* /tmp/* /root/.cache

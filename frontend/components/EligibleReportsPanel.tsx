@@ -46,10 +46,72 @@ const SEV_COLORS: Record<string, string> = {
   info: "bg-slate-500/20 text-slate-300",
 };
 
+const IMPACT_BY_SEV: Record<string, string> = {
+  critical: "Critical risk: possible severe compromise of the system or sensitive data.",
+  high: "High impact: data exposure or misconfiguration that facilitates attacks.",
+  medium: "Medium impact: misconfiguration or information leak that should be remediated.",
+  low: "Low impact: security improvement recommended.",
+  info: "Informational: useful technical detail for security assessment.",
+};
+
+const REMEDIATION_BY_CODE: Record<string, string> = {
+  no_https: "Implement HTTPS and redirect all HTTP traffic to HTTPS.",
+  cors_credentials_wildcard: "Restrict Access-Control-Allow-Origin to trusted origins; do not use * with credentials.",
+  cors_any_origin: "Set Access-Control-Allow-Origin with an explicit list of allowed origins.",
+  security_headers_missing: "Add security headers (X-Content-Type-Options, X-Frame-Options, CSP, etc.).",
+  trace_enabled: "Disable HTTP TRACE method on the server.",
+  request_error: "Ensure the endpoint responds securely without leaking information.",
+  git_head_exposed: "Remove or restrict access to /.git and disable directory listing in production.",
+  server_status_exposed: "Protect or remove status/debug endpoints in production.",
+  actuator_health_exposed: "Restrict access to actuator/health endpoints to internal networks only.",
+};
+
+function buildH1Report(program: BountyProgram, target: BountyTarget): string {
+  const findings = target.recon_checks?.findings ?? [];
+  const url = target.httpx?.url || `https://${target.domain}`;
+  const ipList = (target.ips ?? []).join(", ") || "-";
+  const severity = maxSeverity(findings);
+  const titleFinding = findings[0];
+  const title = titleFinding
+    ? `${titleFinding.title} on ${target.domain}`
+    : `Security findings on ${target.domain}`;
+  const description = findings.length
+    ? `During reconnaissance of program ${program.name}, the asset ${target.domain} (${url}) was analyzed. The following issues were identified: ${findings.map((f) => f.title).join("; ")}. Details and evidence are provided below.`
+    : `Asset ${target.domain} (${url}) in scope of ${program.name}. Describe the identified issue.`;
+  const steps = [
+    `1. Navigate to the in-scope asset: ${url}`,
+    ...findings.map((f, i) => `${i + 2}. Observe: ${f.title}${f.evidence ? ` (evidence: ${f.evidence})` : ""}`),
+  ];
+  const impact = IMPACT_BY_SEV[severity] || IMPACT_BY_SEV.medium;
+  const pocLines = findings.length
+    ? findings.map((f) => `- [${(f.severity || "").toUpperCase()}] ${f.title}${f.evidence ? ` | ${f.evidence}` : ""}`)
+    : ["- Attach screenshots, video, or cURL as appropriate."];
+  const remediationLines: string[] = [];
+  const seen: Record<string, boolean> = {};
+  for (const f of findings) {
+    const line = REMEDIATION_BY_CODE[f.code as string] || `Fix: ${f.title}`;
+    if (!seen[line]) { seen[line] = true; remediationLines.push(line); }
+  }
+  if (!remediationLines.length) remediationLines.push("Apply remediation per best practices for this finding type.");
+
+  return [
+    `## Summary`, ``, title, ``,
+    `## Severity`, severity.charAt(0).toUpperCase() + severity.slice(1), ``,
+    `## Asset`, `- Domain: ${target.domain}`, `- IPs: ${ipList}`, `- URL: ${url}`, `- HTTP Status: ${target.httpx?.status_code ?? "-"}`, ``,
+    `## Description`, description, ``,
+    `## Steps to Reproduce`, ...steps, ``,
+    `## Impact`, impact, ``,
+    `## Proof of Concept`, ...pocLines, ``,
+    `## Remediation`, ...remediationLines, ``,
+    `## References`, `- Review program policy and OWASP/CWE best practices for this weakness type.`, ``,
+  ].join("\n");
+}
+
 export default function EligibleReportsPanel() {
   const [items, setItems] = useState<EligibleItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [detailItem, setDetailItem] = useState<EligibleItem | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -194,7 +256,27 @@ export default function EligibleReportsPanel() {
                   {highFindings.length > 0 && <span className="text-red-400 font-semibold tabular-nums">{highFindings.length} high+</span>}
                   <span className="text-[var(--muted)] tabular-nums">score {score}</span>
                   {httpCode && <span className="text-[var(--muted)] tabular-nums">{httpCode}</span>}
-                  <span className="ml-auto text-xs text-[var(--accent-light)] opacity-0 group-hover:opacity-100 transition-opacity">→</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const md = buildH1Report(item.program, item.target);
+                      navigator.clipboard.writeText(md).catch(() => {});
+                      setCopiedId(item.target.id);
+                      setTimeout(() => setCopiedId(null), 2000);
+                      if (item.program.url) {
+                        const reportUrl = item.program.url.replace(/\/?$/, "/reports/new");
+                        window.open(reportUrl, "_blank", "noopener,noreferrer");
+                      }
+                    }}
+                    className={`ml-auto rounded-lg px-3 py-1 text-xs font-bold transition-all ${
+                      copiedId === item.target.id
+                        ? "bg-emerald-600 text-white"
+                        : "bg-orange-500 hover:bg-orange-400 text-white"
+                    }`}
+                  >
+                    {copiedId === item.target.id ? "Copiado!" : "Reportar H1"}
+                  </button>
                 </div>
               </button>
             );
@@ -221,6 +303,42 @@ export default function EligibleReportsPanel() {
 
           return (
             <div className="space-y-6">
+              {/* Reportar H1 — main action */}
+              <button
+                type="button"
+                onClick={() => {
+                  const md = buildH1Report(p, t);
+                  navigator.clipboard.writeText(md).catch(() => {});
+                  setCopiedId(t.id);
+                  setTimeout(() => setCopiedId(null), 2500);
+                  if (p.url) {
+                    const reportUrl = p.url.replace(/\/?$/, "/reports/new");
+                    window.open(reportUrl, "_blank", "noopener,noreferrer");
+                  }
+                }}
+                className={`w-full rounded-xl py-3.5 text-lg font-bold transition-all flex items-center justify-center gap-3 ${
+                  copiedId === t.id
+                    ? "bg-emerald-600 text-white"
+                    : "bg-orange-500 hover:bg-orange-400 text-white shadow-lg shadow-orange-500/20"
+                }`}
+              >
+                {copiedId === t.id ? (
+                  <>
+                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Report copiado! Abrindo HackerOne...
+                  </>
+                ) : (
+                  <>
+                    <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" />
+                    </svg>
+                    Reportar no HackerOne
+                  </>
+                )}
+              </button>
+
               {/* Top metric cards */}
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
                 {[
