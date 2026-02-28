@@ -54,18 +54,25 @@ function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-async function apiFetch<T>(path: string): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    cache: "no-store",
-    headers: { ...authHeaders() },
-  });
-  if (res.status === 401) {
-    clearToken();
-    if (typeof window !== "undefined") window.location.href = "/";
-    throw new Error("Sessao expirada");
+async function apiFetch<T>(path: string, timeoutMs = 15000): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      cache: "no-store",
+      headers: { ...authHeaders() },
+      signal: controller.signal,
+    });
+    if (res.status === 401) {
+      clearToken();
+      if (typeof window !== "undefined") window.location.href = "/";
+      throw new Error("Sessao expirada");
+    }
+    if (!res.ok) throw new Error(`API ${path}: ${res.status}`);
+    return res.json();
+  } finally {
+    clearTimeout(timer);
   }
-  if (!res.ok) throw new Error(`API ${path}: ${res.status}`);
-  return res.json();
 }
 
 const API_POST = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
@@ -404,11 +411,11 @@ function buildQuery(params: HackerOnePageParams): string {
 
 /** Lista reports (submissões) do hacker na HackerOne. Requer credenciais no backend. */
 export const fetchHackerOneReports = (params: HackerOnePageParams = {}) =>
-  apiFetch<HackerOneListResponse>(`/api/hackerone/reports${buildQuery(params)}`);
+  apiFetch<HackerOneListResponse>(`/api/hackerone/reports${buildQuery(params)}`, 20000);
 
 /** Lista earnings (bounties recebidos) do hacker na HackerOne. */
 export const fetchHackerOneEarnings = (params: HackerOnePageParams = {}) =>
-  apiFetch<HackerOneListResponse>(`/api/hackerone/earnings${buildQuery(params)}`);
+  apiFetch<HackerOneListResponse>(`/api/hackerone/earnings${buildQuery(params)}`, 20000);
 
 /** Lista programas HackerOne disponíveis para o hacker. */
 export const fetchHackerOnePrograms = (params: HackerOnePageParams = {}) =>
@@ -495,3 +502,206 @@ export const submitTargetToH1 = (targetId: string) =>
     `/api/bounty/targets/${targetId}/submit-h1`,
     {}
   );
+
+// ---------------------------------------------------------------------------
+// Program Scorer
+// ---------------------------------------------------------------------------
+
+export interface PrioritizedProgram {
+  program_id: string;
+  name: string;
+  score: number;
+  tier: string;
+  recommendation: string;
+  has_bounty: boolean;
+  bounty_max: number | null;
+  alive_targets: number;
+}
+
+export const scoreAllPrograms = () =>
+  API_POST<{ scored: number; programs: PrioritizedProgram[] }>("/api/bounty/score-programs", {});
+
+export const fetchPrioritizedPrograms = (minScore = 40) =>
+  apiFetch<PrioritizedProgram[]>(`/api/bounty/prioritized-programs?min_score=${minScore}`);
+
+export const discoverH1Programs = () =>
+  API_POST<{ new_programs_found: number; auto_imported: number; imported: any[] }>("/api/bounty/h1-discover", {});
+
+// ---------------------------------------------------------------------------
+// Advanced Scanner Stats
+// ---------------------------------------------------------------------------
+
+export interface ScannerStats {
+  idor: Record<string, number>;
+  ssrf: Record<string, number>;
+  graphql: Record<string, number>;
+  race_condition: Record<string, number>;
+  interactsh: Record<string, number>;
+  ct_monitor: Record<string, number>;
+  cve_monitor: Record<string, number>;
+  scorer: Record<string, any>;
+  ai: Record<string, any>;
+}
+
+export const fetchScannerStats = () =>
+  apiFetch<ScannerStats>("/api/scanners/stats");
+
+// ---------------------------------------------------------------------------
+// Blind Vulns (Interactsh)
+// ---------------------------------------------------------------------------
+
+export const fetchBlindVulns = () =>
+  apiFetch<any[]>("/api/blind-vulns");
+
+// ---------------------------------------------------------------------------
+// CT Monitor
+// ---------------------------------------------------------------------------
+
+export const triggerCTCheck = () =>
+  API_POST<{ programs_checked: number; new_domains_found: number }>("/api/ct/check-all", {});
+
+export const fetchCTStats = () =>
+  apiFetch<Record<string, any>>("/api/ct/stats");
+
+// ---------------------------------------------------------------------------
+// CVE Monitor
+// ---------------------------------------------------------------------------
+
+export const triggerCVECheck = () =>
+  API_POST<{ total_cves: number; web_cves: number; templates_created: number }>("/api/cve/check", {});
+
+export const fetchRecentCVEs = () =>
+  apiFetch<any[]>("/api/cve/recent");
+
+export const fetchCVEStats = () =>
+  apiFetch<Record<string, any>>("/api/cve/stats");
+
+// ---------------------------------------------------------------------------
+// ROI Tracker
+// ---------------------------------------------------------------------------
+
+export interface ROIDashboard {
+  summary: {
+    total_earnings: number;
+    total_reports_paid: number;
+    avg_payout: number;
+    highest_payout: number;
+  };
+  operations: {
+    total_programs: number;
+    active_programs: number;
+    total_targets: number;
+    alive_targets: number;
+    reports_submitted: number;
+    reports_accepted: number;
+    reports_failed: number;
+    acceptance_rate: number;
+  };
+  top_programs: {
+    name: string;
+    earned: number;
+    reports: number;
+    hourly_rate: number;
+    efficiency: string;
+  }[];
+  most_profitable_vulns: {
+    type: string;
+    earnings: number;
+    count: number;
+    avg_payout: number;
+  }[];
+  monthly_trend: Record<string, { earnings: number; count: number }>;
+  recommendations: string[];
+  generated_at: string;
+}
+
+export const fetchROIDashboard = () =>
+  apiFetch<ROIDashboard>("/api/roi/dashboard");
+
+export const fetchEarningsSummary = () =>
+  apiFetch<any>("/api/roi/earnings");
+
+export const recordEarning = (data: {
+  program_id: string;
+  program_name: string;
+  amount: number;
+  currency?: string;
+  vuln_type?: string;
+}) => API_POST<{ ok: boolean }>("/api/roi/record-earning", data);
+
+// ---------------------------------------------------------------------------
+// Enhanced Report Generation
+// ---------------------------------------------------------------------------
+
+export const generateTargetReport = (targetId: string) =>
+  API_POST<{
+    title: string;
+    body?: string;
+    vulnerability_information?: string;
+    severity: string;
+    severity_rating?: string;
+    impact: string;
+    confidence?: number;
+    auto_submit_eligible?: boolean;
+    source: "ai" | "template";
+    ai_provider?: string;
+  }>(`/api/bounty/targets/${targetId}/generate-report`, {});
+
+// ---------------------------------------------------------------------------
+// AI Analyzer
+// ---------------------------------------------------------------------------
+
+export interface AIStats {
+  provider: string;
+  model: string;
+  enabled: boolean;
+  requests: number;
+  tokens_used: number;
+  errors: number;
+  reports_generated: number;
+  findings_classified: number;
+  responses_analyzed: number;
+}
+
+export const fetchAIStats = () =>
+  apiFetch<AIStats>("/api/ai/stats");
+
+export const aiClassifyFinding = (finding: Record<string, unknown>) =>
+  API_POST<{
+    classification: "true_positive" | "false_positive";
+    real_severity: string;
+    worth_reporting: boolean;
+    confidence: number;
+    reasoning: string;
+    suggested_title?: string;
+  }>("/api/ai/classify-finding", { finding });
+
+export const aiClassifyTarget = (targetId: string) =>
+  API_POST<{
+    original: number;
+    filtered: number;
+    removed: number;
+    findings: any[];
+  }>(`/api/ai/classify-target/${targetId}`, {});
+
+export const aiAnalyzeResponse = (data: { url: string; status_code: number; headers: Record<string, string>; body: string }) =>
+  API_POST<{ findings: any[] }>("/api/ai/analyze-response", data);
+
+export const aiParseScope = (data: { description: string; policy?: string }) =>
+  API_POST<{
+    in_scope: string[];
+    out_of_scope: string[];
+    priority_vulns: string[];
+    restrictions: string[];
+    bounty_range: { min: number; max: number; currency: string };
+    tips: string[];
+  }>("/api/ai/parse-scope", data);
+
+export const aiAnalyzeJS = (data: { code: string; source_url?: string }) =>
+  API_POST<{ findings: any[] }>("/api/ai/analyze-js", data);
+
+export const aiFindChains = (targetId: string) =>
+  API_POST<{
+    chains: { chain_name: string; severity: string; steps: string[]; impact: string; findings_used: string[] }[];
+    findings_analyzed: number;
+  }>(`/api/ai/find-chains/${targetId}`, {});

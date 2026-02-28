@@ -39,6 +39,38 @@ from app.bounty import (
     get_recon_stats,
     BOUNTY_MODE,
 )
+from app.program_scorer import (
+    start_program_scorer, score_all_programs,
+    get_prioritized_programs, get_scorer_stats,
+    auto_import_new_programs, fetch_new_h1_programs,
+)
+from app.interactsh_client import (
+    start_interactsh_poller, get_interactsh_stats,
+    get_confirmed_vulns,
+)
+from app.ct_monitor import start_ct_monitor, get_ct_stats, check_all_programs as ct_check_all
+from app.cve_monitor import start_cve_monitor, get_cve_stats, get_recent_cves, process_new_cves
+from app.roi_tracker import (
+    start_roi_tracker, get_overall_dashboard as roi_dashboard,
+    get_earnings_summary, record_earning, get_program_roi,
+)
+from app.idor_scanner import get_idor_stats
+from app.ssrf_scanner import get_ssrf_stats
+from app.graphql_scanner import get_graphql_stats
+from app.race_condition_scanner import get_race_stats
+from app.report_generator import generate_h1_report, deduplicate_findings
+from app.ai_analyzer import (
+    AI_ENABLED as AI_ANALYZER_ENABLED,
+    ai_write_report, ai_classify_finding, ai_classify_findings_batch,
+    ai_analyze_response, ai_parse_scope, ai_analyze_javascript,
+    ai_find_vuln_chains, get_ai_stats,
+)
+from app.bounty_targets_data import (
+    start_bounty_data_sync, sync_bounty_targets_data,
+    fetch_all_programs as btd_fetch_all, fetch_domain_lists,
+    search_programs as btd_search, get_bounty_data_stats,
+    get_all_bounty_domains,
+)
 from app.bug_scraper_integration import sync_bug_scraper_programs
 from app.auth import AuthMiddleware, authenticate, AUTH_USERNAME
 
@@ -1132,8 +1164,10 @@ def _hackerone_request(method: str, path: str, params: dict | None = None, json_
             json=json_body,
             auth=(username, token),
             headers={"Accept": "application/json"},
-            timeout=30,
+            timeout=12,
         )
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="HackerOne API timeout (12s)")
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"HackerOne request failed: {e!s}")
     if r.status_code == 401:
@@ -1213,6 +1247,370 @@ def api_bounty_stats():
     }
 
 
+# ---------------------------------------------------------------------------
+# Program Scorer endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/bounty/score-programs")
+def api_score_programs():
+    """Score all programs by attractiveness and return ranked list."""
+    results = score_all_programs()
+    return {"scored": len(results), "programs": results}
+
+
+@app.get("/api/bounty/prioritized-programs")
+def api_prioritized_programs(min_score: int = 40):
+    """Get programs ranked by attractiveness score."""
+    return get_prioritized_programs(min_score)
+
+
+@app.get("/api/bounty/scorer/stats")
+def api_scorer_stats():
+    return get_scorer_stats()
+
+
+@app.post("/api/bounty/h1-discover")
+def api_h1_discover_programs():
+    """Discover and auto-import new HackerOne programs."""
+    new_programs = fetch_new_h1_programs()
+    imported = auto_import_new_programs()
+    return {
+        "new_programs_found": len(new_programs),
+        "auto_imported": len(imported),
+        "imported": imported,
+        "all_new": new_programs[:20],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Advanced Scanner Stats
+# ---------------------------------------------------------------------------
+
+@app.get("/api/scanners/stats")
+def api_scanner_stats():
+    """Get stats from all advanced scanners."""
+    return {
+        "idor": get_idor_stats(),
+        "ssrf": get_ssrf_stats(),
+        "graphql": get_graphql_stats(),
+        "race_condition": get_race_stats(),
+        "interactsh": get_interactsh_stats(),
+        "ct_monitor": get_ct_stats(),
+        "cve_monitor": get_cve_stats(),
+        "scorer": get_scorer_stats(),
+        "ai": get_ai_stats(),
+        "bounty_data": get_bounty_data_stats(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Interactsh / Blind Vulns
+# ---------------------------------------------------------------------------
+
+@app.get("/api/blind-vulns")
+def api_blind_vulns():
+    """Get confirmed blind vulnerabilities from interactsh callbacks."""
+    return get_confirmed_vulns()
+
+
+# ---------------------------------------------------------------------------
+# CT Monitor
+# ---------------------------------------------------------------------------
+
+@app.post("/api/ct/check-all")
+def api_ct_check():
+    """Trigger CT log check for all programs."""
+    results = ct_check_all()
+    total_new = sum(len(r.get("new_domains", [])) for r in results)
+    return {"programs_checked": len(results), "new_domains_found": total_new, "results": results}
+
+
+@app.get("/api/ct/stats")
+def api_ct_stats():
+    return get_ct_stats()
+
+
+# ---------------------------------------------------------------------------
+# CVE Monitor
+# ---------------------------------------------------------------------------
+
+@app.post("/api/cve/check")
+def api_cve_check():
+    """Trigger CVE feed check and auto-template generation."""
+    return process_new_cves()
+
+
+@app.get("/api/cve/recent")
+def api_cve_recent():
+    """Get recent critical/high CVEs."""
+    return get_recent_cves()
+
+
+@app.get("/api/cve/stats")
+def api_cve_stats():
+    return get_cve_stats()
+
+
+# ---------------------------------------------------------------------------
+# ROI Tracker
+# ---------------------------------------------------------------------------
+
+@app.get("/api/roi/dashboard")
+def api_roi_dashboard():
+    """Get complete ROI dashboard with earnings, programs, and recommendations."""
+    return roi_dashboard()
+
+
+@app.get("/api/roi/earnings")
+def api_roi_earnings():
+    """Get earnings summary."""
+    return get_earnings_summary()
+
+
+@app.post("/api/roi/record-earning")
+def api_record_earning(body: dict):
+    """Manually record a bounty earning."""
+    amount = body.get("amount", 0)
+    if not amount or amount <= 0:
+        raise HTTPException(status_code=400, detail="amount must be positive")
+    record_earning(
+        program_id=body.get("program_id", ""),
+        program_name=body.get("program_name", ""),
+        amount=float(amount),
+        currency=body.get("currency", "USD"),
+        vuln_type=body.get("vuln_type", ""),
+        report_id=body.get("report_id", ""),
+        h1_report_id=body.get("h1_report_id", ""),
+    )
+    return {"ok": True}
+
+
+@app.get("/api/roi/program/{program_id}")
+def api_roi_program(program_id: str):
+    """Get ROI data for a specific program."""
+    return get_program_roi(program_id)
+
+
+# ---------------------------------------------------------------------------
+# Enhanced Report Generation
+# ---------------------------------------------------------------------------
+
+@app.post("/api/bounty/targets/{target_id}/generate-report")
+def api_generate_target_report(target_id: str):
+    """Generate a high-quality H1 report for a specific target. Uses AI if available."""
+    try:
+        oid = ObjectId(target_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid target id")
+
+    tcol = get_bounty_targets()
+    target = tcol.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    pcol = get_bounty_programs()
+    program = pcol.find_one({"_id": target.get("program_id")})
+    program_name = program.get("name", "?") if program else "?"
+    program_url = program.get("url", "") if program else ""
+
+    findings = (target.get("recon_checks") or {}).get("findings", [])
+    findings = deduplicate_findings(findings)
+
+    if not findings:
+        return {"error": "No findings for this target"}
+
+    domain = target.get("domain", "?")
+
+    if AI_ANALYZER_ENABLED:
+        ai_report = ai_write_report(domain, findings, program_name, program_url)
+        if ai_report:
+            ai_report["source"] = "ai"
+            ai_report["ai_provider"] = get_ai_stats().get("provider", "")
+            return ai_report
+
+    report = generate_h1_report(
+        domain=domain,
+        findings=findings,
+        program_name=program_name,
+        program_url=program_url,
+    )
+    report["source"] = "template"
+    return report
+
+
+# ---------------------------------------------------------------------------
+# Bounty Targets Data (arkadiyt/bounty-targets-data)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/bounty-data/sync")
+def api_bounty_data_sync(body: dict | None = None):
+    """Sync programs from bounty-targets-data (HackerOne + Bugcrowd + Intigriti + YesWeHack)."""
+    body = body or {}
+    platforms = body.get("platforms")
+    bounty_only = body.get("bounty_only", False)
+    result = sync_bounty_targets_data(platforms=platforms, bounty_only=bounty_only)
+    return result
+
+
+@app.get("/api/bounty-data/stats")
+def api_bounty_data_stats():
+    """Get bounty-targets-data sync stats."""
+    return get_bounty_data_stats()
+
+
+@app.get("/api/bounty-data/search")
+def api_bounty_data_search(q: str = "", platform: str = "", bounty_only: bool = False, limit: int = 50):
+    """Search programs from bounty-targets-data."""
+    from app.bounty import _serialize_bounty_doc  # noqa: F811
+    programs = btd_search(query=q, platform=platform, bounty_only=bounty_only, limit=limit)
+    results = []
+    for p in programs:
+        d = dict(p)
+        d["id"] = str(d.pop("_id", ""))
+        for k in ("created_at", "last_data_sync", "scope_change_detected"):
+            if k in d and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        results.append(d)
+    return results
+
+
+@app.get("/api/bounty-data/domains")
+def api_bounty_data_domains():
+    """Get cached bounty domain/wildcard lists."""
+    data = get_all_bounty_domains()
+    return {
+        "domains_count": len(data.get("domains", [])),
+        "wildcards_count": len(data.get("wildcards", [])),
+        "domains_sample": data.get("domains", [])[:100],
+        "wildcards_sample": data.get("wildcards", [])[:100],
+    }
+
+
+# ---------------------------------------------------------------------------
+# AI Analyzer Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/ai/stats")
+def api_ai_stats():
+    """Get AI analyzer stats and configuration."""
+    return get_ai_stats()
+
+
+@app.post("/api/ai/classify-finding")
+def api_ai_classify(body: dict):
+    """Use AI to classify a finding as true/false positive."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured. Set AI_PROVIDER + API key in .env")
+    finding = body.get("finding")
+    if not finding:
+        raise HTTPException(status_code=400, detail="finding is required")
+    result = ai_classify_finding(finding)
+    if not result:
+        raise HTTPException(status_code=502, detail="AI classification failed")
+    return result
+
+
+@app.post("/api/ai/classify-target/{target_id}")
+def api_ai_classify_target(target_id: str):
+    """Use AI to classify all findings of a target, filtering false positives."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured")
+    try:
+        oid = ObjectId(target_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid target id")
+
+    tcol = get_bounty_targets()
+    target = tcol.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    findings = (target.get("recon_checks") or {}).get("findings", [])
+    if not findings:
+        return {"original": 0, "filtered": 0, "findings": []}
+
+    classified = ai_classify_findings_batch(findings)
+
+    tcol.update_one({"_id": oid}, {"$set": {
+        "recon_checks.findings": classified,
+        "recon_checks.total_findings": len(classified),
+        "recon_checks.ai_classified": True,
+    }})
+
+    return {
+        "original": len(findings),
+        "filtered": len(classified),
+        "removed": len(findings) - len(classified),
+        "findings": classified,
+    }
+
+
+@app.post("/api/ai/analyze-response")
+def api_ai_analyze_response(body: dict):
+    """Use AI to analyze an HTTP response for vulnerabilities."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured")
+    url = body.get("url", "")
+    status_code = body.get("status_code", 200)
+    headers = body.get("headers", {})
+    response_body = body.get("body", "")
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    result = ai_analyze_response(url, status_code, headers, response_body)
+    return {"findings": result or []}
+
+
+@app.post("/api/ai/parse-scope")
+def api_ai_parse_scope(body: dict):
+    """Use AI to parse a bounty program description and extract scope."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured")
+    description = body.get("description", "")
+    policy = body.get("policy", "")
+    if not description:
+        raise HTTPException(status_code=400, detail="description is required")
+    result = ai_parse_scope(description, policy)
+    if not result:
+        raise HTTPException(status_code=502, detail="AI scope parsing failed")
+    return result
+
+
+@app.post("/api/ai/analyze-js")
+def api_ai_analyze_js(body: dict):
+    """Use AI to analyze JavaScript code for secrets and vulnerabilities."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured")
+    code = body.get("code", "")
+    source_url = body.get("source_url", "")
+    if not code:
+        raise HTTPException(status_code=400, detail="code is required")
+    result = ai_analyze_javascript(code, source_url)
+    return {"findings": result or []}
+
+
+@app.post("/api/ai/find-chains/{target_id}")
+def api_ai_find_chains(target_id: str):
+    """Use AI to find vulnerability chains across findings of a target."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured")
+    try:
+        oid = ObjectId(target_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid target id")
+
+    tcol = get_bounty_targets()
+    target = tcol.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    findings = (target.get("recon_checks") or {}).get("findings", [])
+    if len(findings) < 2:
+        return {"chains": [], "message": "Need at least 2 findings to find chains"}
+
+    chains = ai_find_vuln_chains(findings, target.get("domain", "?"))
+    return {"chains": chains or [], "findings_analyzed": len(findings)}
+
+
 def start_scanner_thread():
     t = threading.Thread(
         target=run_scanner,
@@ -1244,4 +1642,10 @@ def on_startup():
         logger.info("[STARTUP] Scanner de rede desabilitado por config")
     start_vuln_scanner()
     start_bounty_system()
-    logger.info("API pronta em :5000 | VulnScanner + Bounty rodando")
+    start_program_scorer()
+    start_interactsh_poller()
+    start_ct_monitor()
+    start_cve_monitor()
+    start_roi_tracker()
+    start_bounty_data_sync()
+    logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData rodando")

@@ -50,6 +50,12 @@ from app.advanced_recon import (
     run_github_dorking,
     run_paramspider,
 )
+from app.idor_scanner import scan_target_for_idor
+from app.ssrf_scanner import scan_target_for_ssrf
+from app.graphql_scanner import scan_graphql
+from app.race_condition_scanner import scan_target_for_race
+from app.interactsh_client import generate_payload, INTERACTSH_ENABLED
+from app.report_generator import deduplicate_findings, calculate_confidence
 
 logger = logging.getLogger("scanner.bounty")
 
@@ -1383,8 +1389,76 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             logger.info("[RECON] [12d/18] JS Secrets: %d leaks encontrados em %.1fs",
                          len(js_secrets), time.time() - t0)
 
-        # --- Etapa 13: Change detection ---
-        logger.info("[RECON] [13/18] Change detection...")
+        # --- Etapa 13: IDOR + SSRF + GraphQL + Race Condition scans ---
+        idor_findings: list[dict] = []
+        ssrf_findings: list[dict] = []
+        graphql_findings: list[dict] = []
+        race_findings: list[dict] = []
+
+        if alive_hosts and all_discovered_urls:
+            logger.info("[RECON] [13/22] Advanced vuln scans (IDOR, SSRF, GraphQL, Race)...")
+            t0 = time.time()
+
+            callback_host = None
+            if INTERACTSH_ENABLED:
+                try:
+                    callback_host = generate_payload({
+                        "target": prog_name,
+                        "vuln_type": "ssrf_recon",
+                        "scanner_module": "bounty_pipeline",
+                    })
+                except Exception:
+                    pass
+
+            for host in sorted(alive_hosts)[:15]:
+                host_crawled = [u for u in all_discovered_urls if host in u]
+                host_wb = []
+                for d, urls in wayback_urls.items():
+                    if host.endswith(d) or host == d:
+                        host_wb = urls
+                        break
+                ps_urls = []
+                for d, ps in paramspider_data.items():
+                    if host.endswith(d) or host == d:
+                        ps_urls = ps.get("urls_with_params", [])
+                        break
+
+                try:
+                    idor_res = scan_target_for_idor(host, host_crawled, host_wb)
+                    idor_findings.extend(idor_res)
+                except Exception as e:
+                    logger.debug("[RECON] IDOR scan error on %s: %s", host, e)
+
+                try:
+                    ssrf_res = scan_target_for_ssrf(host, host_crawled, host_wb, ps_urls, callback_host)
+                    ssrf_findings.extend(ssrf_res)
+                except Exception as e:
+                    logger.debug("[RECON] SSRF scan error on %s: %s", host, e)
+
+                hd = httpx_by_host.get(host)
+                base_url = (hd.get("url") if hd else None) or f"https://{host}"
+                try:
+                    gql_res = scan_graphql(base_url)
+                    graphql_findings.extend(gql_res)
+                except Exception as e:
+                    logger.debug("[RECON] GraphQL scan error on %s: %s", host, e)
+
+                try:
+                    race_res = scan_target_for_race(host, host_crawled, host_wb)
+                    race_findings.extend(race_res)
+                except Exception as e:
+                    logger.debug("[RECON] Race scan error on %s: %s", host, e)
+
+            all_advanced = idor_findings + ssrf_findings + graphql_findings + race_findings
+            logger.info("[RECON] [13/22] Advanced scans: IDOR=%d SSRF=%d GraphQL=%d Race=%d (%.1fs)",
+                         len(idor_findings), len(ssrf_findings), len(graphql_findings),
+                         len(race_findings), time.time() - t0)
+        else:
+            logger.info("[RECON] [13/22] Advanced scans: skipped (no alive hosts or URLs)")
+            all_advanced = []
+
+        # --- Etapa 14: Change detection ---
+        logger.info("[RECON] [14/22] Change detection...")
         changes = _detect_and_save_changes(oid, prog_name, set(scoped), previous_subdomains)
 
         # --- Etapa 14: Save to MongoDB ---
@@ -1400,8 +1474,13 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             http_scanner = http_scanner_by_host.get(sub, [])
             is_new = sub in changes.get("new_subdomains", [])
 
-            # Inject zone transfer + github + JS secret findings into recon_checks
-            extra_findings = list(zone_transfer_findings) + list(github_findings) + list(js_secrets)
+            # Inject all extra findings into recon_checks
+            sub_idor = [f for f in idor_findings if sub in f.get("evidence", "") or sub in f.get("original_url", "")]
+            sub_ssrf = [f for f in ssrf_findings if sub in f.get("evidence", "") or sub in f.get("test_url", "")]
+            sub_gql = [f for f in graphql_findings if sub in f.get("evidence", "")]
+            sub_race = [f for f in race_findings if sub in f.get("url", "") or sub in f.get("evidence", "")]
+            extra_findings = (list(zone_transfer_findings) + list(github_findings) + list(js_secrets)
+                              + sub_idor + sub_ssrf + sub_gql + sub_race)
             if extra_findings and is_alive:
                 if not isinstance(recon_checks.get("findings"), list):
                     recon_checks["findings"] = []
@@ -1518,6 +1597,10 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             "katana_urls": len(katana_urls),
             "gau_urls": len(gau_urls),
             "js_secrets": len(js_secrets),
+            "idor_findings": len(idor_findings),
+            "ssrf_findings": len(ssrf_findings),
+            "graphql_findings": len(graphql_findings),
+            "race_findings": len(race_findings),
             "h1_submitted": len(h1_submitted),
             "new_subdomains": changes.get("total_new", 0),
             "removed_subdomains": changes.get("total_removed", 0),

@@ -76,6 +76,10 @@ def get_submitted_reports():
     return RedisCollection(get_redis(), "submitted_reports", max_docs=500)
 
 
+def get_roi_earnings():
+    return RedisCollection(get_redis(), "roi_earnings", max_docs=1000)
+
+
 # ── init ────────────────────────────────────────────────────────
 
 def init_db():

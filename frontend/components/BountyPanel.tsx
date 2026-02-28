@@ -17,6 +17,7 @@ import {
   fetchBountyReport,
   syncBugScraperPrograms,
   deleteAllBountyPrograms,
+  generateTargetReport,
   type BountyProgram,
   type BountyTarget,
   type BountyStats,
@@ -177,6 +178,218 @@ function buildReportTemplate(program: BountyProgram, target: BountyTarget): stri
     "- Revisar política do programa e boas práticas OWASP/CWE para o tipo de weakness.",
     "",
   ].join("\n");
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Report Actions — Generate, Preview & Copy for any platform
+   ═══════════════════════════════════════════════════════════════ */
+
+function ReportActions({ targetId, program, target }: {
+  targetId: string;
+  program: BountyProgram | null;
+  target: BountyTarget;
+}) {
+  const [report, setReport] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState("");
+  const [showPreview, setShowPreview] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleGenerate = async () => {
+    setLoading(true);
+    setError("");
+    try {
+      const r = await generateTargetReport(targetId);
+      setReport(r);
+      setShowPreview(true);
+    } catch (e: any) {
+      setError(e.message || "Failed to generate report");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const copyToClipboard = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(label);
+      setTimeout(() => setCopied(""), 2000);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      setCopied(label);
+      setTimeout(() => setCopied(""), 2000);
+    }
+  };
+
+  const formatForPlatform = (platform: string): string => {
+    if (!report) return "";
+
+    const body = report.body || report.vulnerability_information || "";
+    const title = report.title || "";
+    const severity = report.severity || report.severity_rating || "medium";
+    const impact = report.impact || "";
+
+    if (platform === "hackerone") {
+      return body;
+    }
+
+    if (platform === "bugcrowd") {
+      return [
+        `# ${title}`,
+        "",
+        `**Severity:** ${severity.toUpperCase()}`,
+        `**Target:** ${target.domain}`,
+        "",
+        body,
+        "",
+        impact ? `## Business Impact\n\n${impact}` : "",
+      ].filter(Boolean).join("\n");
+    }
+
+    if (platform === "intigriti") {
+      return [
+        `## Submission Title`,
+        title,
+        "",
+        `## Domain`,
+        target.domain,
+        "",
+        `## Endpoint`,
+        target.httpx?.url || `https://${target.domain}`,
+        "",
+        `## Description`,
+        body,
+        "",
+        impact ? `## Impact Statement\n\n${impact}` : "",
+      ].filter(Boolean).join("\n");
+    }
+
+    if (platform === "yeswehack") {
+      return [
+        `# ${title}`,
+        "",
+        `**Severity:** ${severity.toUpperCase()}`,
+        `**Scope:** ${target.domain}`,
+        "",
+        body,
+        "",
+        impact ? `## Impact\n\n${impact}` : "",
+      ].filter(Boolean).join("\n");
+    }
+
+    return `# ${title}\n\n${body}`;
+  };
+
+  const platforms = [
+    { id: "hackerone", label: "HackerOne", icon: "🟢", color: "border-green-500/30 bg-green-500/5 hover:bg-green-500/10 text-green-400" },
+    { id: "bugcrowd", label: "Bugcrowd", icon: "🟠", color: "border-orange-500/30 bg-orange-500/5 hover:bg-orange-500/10 text-orange-400" },
+    { id: "intigriti", label: "Intigriti", icon: "🔵", color: "border-blue-500/30 bg-blue-500/5 hover:bg-blue-500/10 text-blue-400" },
+    { id: "yeswehack", label: "YesWeHack", icon: "🟡", color: "border-yellow-500/30 bg-yellow-500/5 hover:bg-yellow-500/10 text-yellow-400" },
+    { id: "markdown", label: "Markdown", icon: "📋", color: "border-[var(--border)] bg-white/[0.02] hover:bg-white/[0.05] text-[var(--foreground)]" },
+  ];
+
+  return (
+    <div className="border-t border-[var(--border)] pt-4">
+      <h3 className="text-base font-semibold text-[var(--foreground)] mb-3">Report</h3>
+
+      {!report && !showPreview && (
+        <button
+          onClick={handleGenerate}
+          disabled={loading}
+          className={`w-full py-3 rounded-xl text-base font-semibold transition-all ${
+            loading
+              ? "bg-[var(--accent)]/10 text-[var(--accent-light)] cursor-wait"
+              : "bg-[var(--accent)]/15 text-[var(--accent-light)] hover:bg-[var(--accent)]/25 border border-[var(--accent)]/30"
+          }`}
+        >
+          {loading ? "Generating report (AI may take ~30s)..." : "Generate Report"}
+        </button>
+      )}
+
+      {error && <div className="text-sm text-red-400 mt-2 p-2 rounded-lg bg-red-500/5 border border-red-500/20">{error}</div>}
+
+      {report && showPreview && (
+        <div className="space-y-3">
+          {/* Source badge */}
+          <div className="flex items-center gap-2">
+            <span className={`text-xs font-bold px-2 py-1 rounded border ${
+              report.source === "ai"
+                ? "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-400"
+                : "border-[var(--accent)]/30 bg-[var(--accent)]/10 text-[var(--accent-light)]"
+            }`}>
+              {report.source === "ai" ? `AI (${report.ai_provider || "ollama"})` : "Template"}
+            </span>
+            <span className={`text-xs font-bold px-2 py-1 rounded sev-${report.severity || report.severity_rating || "medium"}`}>
+              {(report.severity || report.severity_rating || "medium").toUpperCase()}
+            </span>
+            {report.confidence && (
+              <span className="text-xs text-[var(--muted)]">Confidence: {report.confidence}%</span>
+            )}
+            {report.cvss_score && (
+              <span className="text-xs text-amber-400 font-semibold">CVSS {report.cvss_score}</span>
+            )}
+          </div>
+
+          {/* Title */}
+          <div className="rounded-lg bg-[var(--background)] border border-[var(--border)] p-3">
+            <div className="text-[10px] text-[var(--muted)] uppercase font-semibold mb-1">Title</div>
+            <div className="text-sm font-semibold text-[var(--foreground)]">{report.title}</div>
+          </div>
+
+          {/* Copy buttons for each platform */}
+          <div className="space-y-2">
+            <div className="text-[10px] text-[var(--muted)] uppercase font-semibold">Copy report for:</div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+              {platforms.map(p => (
+                <button
+                  key={p.id}
+                  onClick={() => copyToClipboard(formatForPlatform(p.id), p.id)}
+                  className={`flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl border text-sm font-medium transition-all ${p.color}`}
+                >
+                  <span>{p.icon}</span>
+                  <span>{copied === p.id ? "Copied!" : p.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Copy title separately */}
+          <button
+            onClick={() => copyToClipboard(report.title || "", "title")}
+            className="text-xs text-[var(--muted)] hover:text-[var(--foreground)] transition-colors"
+          >
+            {copied === "title" ? "Title copied!" : "Copy title only"}
+          </button>
+
+          {/* Preview body */}
+          <details className="group">
+            <summary className="text-xs text-[var(--muted)] cursor-pointer hover:text-[var(--foreground)] transition-colors">
+              Preview report body
+            </summary>
+            <div className="mt-2 rounded-xl bg-[var(--background)] border border-[var(--border)] p-4 max-h-80 overflow-y-auto hide-scrollbar">
+              <pre className="text-xs text-[var(--foreground)] whitespace-pre-wrap font-mono leading-relaxed">
+                {report.body || report.vulnerability_information || "No body"}
+              </pre>
+            </div>
+          </details>
+
+          {/* Regenerate */}
+          <button
+            onClick={handleGenerate}
+            disabled={loading}
+            className="text-xs text-[var(--accent-light)] hover:text-[var(--foreground)] transition-colors"
+          >
+            {loading ? "Regenerating..." : "Regenerate report"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function BountyPanel() {
@@ -1665,6 +1878,11 @@ export default function BountyPanel() {
                   ))}
                 </div>
               </div>
+            )}
+
+            {/* ── Generate & Copy Report ── */}
+            {(detailTarget.recon_checks?.findings ?? []).length > 0 && (
+              <ReportActions targetId={detailTarget.id} program={programs.find(p => p.id === detailTarget.program_id) ?? null} target={detailTarget} />
             )}
           </div>
         )}

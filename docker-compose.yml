@@ -1,4 +1,4 @@
-# Otimizado para MacBook Pro M4 (12+ cores, 24+ GB RAM, Apple Silicon)
+# Configuracao leve — baixo consumo de recursos
 services:
   redis:
     image: redis:7-alpine
@@ -8,39 +8,36 @@ services:
       - "6379:6379"
     command: >
       redis-server
-      --maxmemory 2gb
+      --maxmemory 512mb
       --maxmemory-policy allkeys-lru
       --appendonly yes
       --appendfsync everysec
       --save 300 10
-      --save 60 10000
-      --tcp-backlog 2048
-      --hz 100
+      --tcp-backlog 512
+      --hz 10
       --dynamic-hz yes
       --lazyfree-lazy-eviction yes
       --lazyfree-lazy-expire yes
       --lazyfree-lazy-server-del yes
-      --io-threads 4
-      --io-threads-do-reads yes
     volumes:
       - redis_data:/data
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
       start_period: 5s
     networks:
       - scanner_net
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2560m
-        reservations:
           cpus: "0.5"
-          memory: 512m
+          memory: 640m
+        reservations:
+          cpus: "0.1"
+          memory: 128m
 
   app:
     build: .
@@ -58,16 +55,11 @@ services:
       - NET_ADMIN
     ulimits:
       nofile:
-        soft: 262144
-        hard: 262144
+        soft: 16384
+        hard: 16384
       nproc:
-        soft: 131072
-        hard: 131072
-    sysctls:
-      - net.ipv4.tcp_tw_reuse=1
-      - net.ipv4.ip_local_port_range=1024 65535
-      - net.ipv4.tcp_fin_timeout=10
-      - net.ipv4.tcp_keepalive_time=120
+        soft: 4096
+        hard: 4096
     env_file:
       - .env
     environment:
@@ -81,24 +73,24 @@ services:
       PYTHONOPTIMIZE: "2"
       PYTHONDONTWRITEBYTECODE: "1"
       MALLOC_ARENA_MAX: "2"
-      UV_THREADPOOL_SIZE: "16"
+      UV_THREADPOOL_SIZE: "4"
 
-      # --- Performance: scanner (M4 power) ---
-      NUM_WORKERS: "1500"
+      # --- Performance: scanner (leve) ---
+      NUM_WORKERS: "50"
       SCAN_INTERVAL: "0"
-      PRESCAN_TIMEOUT: "0.15"
-      BATCH_SIZE: "500"
-      BATCH_FLUSH_INTERVAL: "0.3"
-      MAX_CONCURRENT_CONNS: "50000"
+      PRESCAN_TIMEOUT: "0.5"
+      BATCH_SIZE: "50"
+      BATCH_FLUSH_INTERVAL: "2"
+      MAX_CONCURRENT_CONNS: "1000"
 
       # --- Performance: enrichment rate limits ---
-      SHODAN_RPS: "20"
-      IPAPI_RPS: "2"
-      IPINFO_RPS: "2"
+      SHODAN_RPS: "5"
+      IPAPI_RPS: "1"
+      IPINFO_RPS: "1"
 
       # --- Masscan ---
-      MASSCAN_ENABLED: "auto"
-      MASSCAN_RATE: "200000"
+      MASSCAN_ENABLED: "false"
+      MASSCAN_RATE: "10000"
 
       # --- Vuln scanner ---
       VULN_WORKERS: "8"
@@ -106,18 +98,18 @@ services:
       VULN_AUTO_MIN_SCORE: "50"
       NUCLEI_SEVERITY: "critical,high,medium"
       NUCLEI_TIMEOUT: "180"
-      NUCLEI_RATE_LIMIT: "300"
-      NUCLEI_BULK_SIZE: "75"
-      NUCLEI_CONCURRENCY: "40"
+      NUCLEI_RATE_LIMIT: "50"
+      NUCLEI_BULK_SIZE: "10"
+      NUCLEI_CONCURRENCY: "5"
       NMAP_TIMEOUT: "120"
 
       # --- Bounty ---
       BOUNTY_MODE: "true"
       BOUNTY_RECON_INTERVAL: "14400"
-      BOUNTY_RECON_WORKERS: "6"
-      SUBFINDER_TIMEOUT: "180"
-      HTTPX_TIMEOUT: "180"
-      HTTPX_THREADS: "80"
+      BOUNTY_RECON_WORKERS: "8"
+      SUBFINDER_TIMEOUT: "300"
+      HTTPX_TIMEOUT: "300"
+      HTTPX_THREADS: "10"
 
       # --- HackerOne ---
       HACKERONE_API_USERNAME: "jackpa1984"
@@ -133,14 +125,44 @@ services:
 
       # --- New tools ---
       KATANA_TIMEOUT: "120"
-      KATANA_DEPTH: "3"
+      KATANA_DEPTH: "2"
       GAU_TIMEOUT: "60"
+
+      # --- AI Analyzer (configure in .env) ---
+      # Options: "openai", "anthropic", "ollama", or "" to disable
+      AI_PROVIDER: "${AI_PROVIDER:-ollama}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}"
+      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-xploiter/the-xploiter}"
+      AI_MAX_TOKENS: "${AI_MAX_TOKENS:-3000}"
+      AI_TEMPERATURE: "${AI_TEMPERATURE:-0.1}"
+
+      # --- Advanced scanners ---
+      PROGRAM_SCORER_ENABLED: "true"
+      PROGRAM_SCORER_INTERVAL: "3600"
+      H1_MONITOR_INTERVAL: "1800"
+      IDOR_SCANNER_ENABLED: "true"
+      SSRF_SCANNER_ENABLED: "true"
+      GRAPHQL_SCANNER_ENABLED: "true"
+      RACE_SCANNER_ENABLED: "true"
+      INTERACTSH_ENABLED: "true"
+      INTERACTSH_SERVER: "oast.fun"
+      CT_MONITOR_ENABLED: "true"
+      CT_POLL_INTERVAL: "600"
+      CVE_MONITOR_ENABLED: "true"
+      CVE_POLL_INTERVAL: "1800"
+      ROI_TRACKER_ENABLED: "true"
+      CUSTOM_NUCLEI_TEMPLATES: "/app/nuclei-custom-templates"
 
       # --- Telegram alerts ---
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     volumes:
       - ./app:/app/app
+      - ./nuclei-custom-templates:/app/nuclei-custom-templates
     restart: unless-stopped
     command:
       - uvicorn
@@ -149,23 +171,25 @@ services:
       - --port=5000
       - --log-level=info
       - --timeout-keep-alive=30
-      - --limit-concurrency=500
-      - --backlog=4096
+      - --limit-concurrency=100
+      - --backlog=512
+      - --reload
+      - --reload-dir=/app/app
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "5"
+        max-size: "5m"
+        max-file: "3"
     networks:
       - scanner_net
     deploy:
       resources:
         limits:
-          cpus: "6.0"
-          memory: 8g
-        reservations:
           cpus: "2.0"
           memory: 2g
+        reservations:
+          cpus: "0.5"
+          memory: 512m
 
   frontend:
     build:
@@ -191,16 +215,16 @@ services:
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "5m"
+        max-file: "2"
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2g
+          cpus: "1.0"
+          memory: 1g
         reservations:
-          cpus: "0.5"
-          memory: 512m
+          cpus: "0.25"
+          memory: 256m
     networks:
       - scanner_net
 

@@ -124,6 +124,8 @@ def run_nuclei_scan(ip: str, ports: list[int] | None = None, cves: list[str] | N
     if not targets:
         targets.append(host)
 
+    custom_templates_dir = os.getenv("CUSTOM_NUCLEI_TEMPLATES", "/app/nuclei-custom-templates")
+
     cmd = [
         "nuclei",
         "-target", ",".join(targets),
@@ -140,6 +142,9 @@ def run_nuclei_scan(ip: str, ports: list[int] | None = None, cves: list[str] | N
         "-tags", "cve,exposure,misconfig,takeover,default-login,token,xss,sqli,ssrf,lfi,rce,idor",
         "-exclude-tags", "dos,fuzz,tech,wp-plugin,intrusive",
     ]
+
+    if os.path.isdir(custom_templates_dir) and os.listdir(custom_templates_dir):
+        cmd.extend(["-t", custom_templates_dir])
 
     findings = []
     try:
