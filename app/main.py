@@ -1487,6 +1487,141 @@ def api_bounty_data_domains():
 
 
 # ---------------------------------------------------------------------------
+# Intigriti Researcher API
+# ---------------------------------------------------------------------------
+
+INTIGRITI_API_TOKEN = (os.getenv("INTIGRITI_API_TOKEN") or "").strip()
+INTIGRITI_API_BASE = "https://api.intigriti.com/external/researcher/v1"
+
+
+def _intigriti_request(path: str, params: dict | None = None) -> dict | list:
+    """Call the Intigriti researcher API."""
+    if not INTIGRITI_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTIGRITI_API_TOKEN not configured in .env")
+    url = f"{INTIGRITI_API_BASE}{path}"
+    try:
+        r = requests.get(
+            url,
+            params=params,
+            headers={
+                "Authorization": f"Bearer {INTIGRITI_API_TOKEN}",
+                "Accept": "application/json",
+            },
+            timeout=15,
+        )
+    except requests.Timeout:
+        raise HTTPException(status_code=504, detail="Intigriti API timeout")
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Intigriti request failed: {e!s}")
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="Invalid Intigriti API token")
+    if r.status_code == 403:
+        raise HTTPException(status_code=403, detail="Intigriti API forbidden")
+    if not r.ok:
+        raise HTTPException(status_code=r.status_code, detail=f"Intigriti {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
+@app.get("/api/intigriti/me")
+def api_intigriti_me():
+    """Test Intigriti API token."""
+    if not INTIGRITI_API_TOKEN:
+        return {"configured": False, "detail": "Set INTIGRITI_API_TOKEN in .env"}
+    try:
+        data = _intigriti_request("/programs", {"limit": "1"})
+        count = len(data) if isinstance(data, list) else len(data.get("records", []))
+        return {"configured": True, "ok": True, "programs_accessible": count}
+    except HTTPException as e:
+        return {"configured": True, "ok": False, "detail": e.detail}
+
+
+@app.get("/api/intigriti/programs")
+def api_intigriti_programs():
+    """List Intigriti programs accessible to the researcher."""
+    data = _intigriti_request("/programs")
+    return data
+
+
+@app.get("/api/intigriti/programs/{program_id}")
+def api_intigriti_program_detail(program_id: str):
+    """Get details of a specific Intigriti program."""
+    data = _intigriti_request(f"/programs/{program_id}")
+    return data
+
+
+@app.get("/api/intigriti/activities")
+def api_intigriti_activities():
+    """Get recent Intigriti program activities (scope changes, etc.)."""
+    data = _intigriti_request("/program-activities")
+    return data
+
+
+@app.post("/api/intigriti/import")
+def api_intigriti_import():
+    """Import all Intigriti programs into bounty_programs collection."""
+    if not INTIGRITI_API_TOKEN:
+        raise HTTPException(status_code=503, detail="INTIGRITI_API_TOKEN not configured")
+
+    try:
+        programs_data = _intigriti_request("/programs")
+    except HTTPException:
+        raise
+
+    records = programs_data if isinstance(programs_data, list) else programs_data.get("records", [])
+    col = get_bounty_programs()
+    imported = 0
+    updated = 0
+
+    for prog in records:
+        prog_id = prog.get("programId") or prog.get("id", "")
+        name = prog.get("name") or prog.get("companyHandle", "")
+        if not name:
+            continue
+
+        in_scope = []
+        out_scope = []
+        domains = prog.get("domains") or []
+        for d in domains:
+            domain_val = d.get("endpoint") or d.get("domain", "")
+            if domain_val:
+                if d.get("type", "").lower() == "out":
+                    out_scope.append(domain_val)
+                else:
+                    in_scope.append(domain_val)
+
+        if not in_scope:
+            continue
+
+        max_bounty = prog.get("maxBounty") or prog.get("max_bounty", {})
+        max_val = max_bounty.get("value", 0) if isinstance(max_bounty, dict) else max_bounty
+
+        doc = {
+            "name": name,
+            "platform": "intigriti",
+            "url": f"https://app.intigriti.com/researcher/programs/{prog_id}" if prog_id else "",
+            "in_scope": in_scope,
+            "out_of_scope": out_scope,
+            "has_bounty": (max_val or 0) > 0,
+            "bounty_max": max_val,
+            "source": "intigriti-api",
+            "status": "active",
+        }
+
+        existing = col.find_one({"name": name, "platform": "intigriti"})
+        if existing:
+            col.update_one({"_id": existing["_id"]}, {"$set": doc})
+            updated += 1
+        else:
+            from datetime import datetime as _dt
+            doc["created_at"] = _dt.utcnow()
+            doc["stats"] = {}
+            col.insert_one(doc)
+            imported += 1
+
+    return {"imported": imported, "updated": updated, "total_programs": len(records)}
+
+
+# ---------------------------------------------------------------------------
 # AI Analyzer Endpoints
 # ---------------------------------------------------------------------------
 

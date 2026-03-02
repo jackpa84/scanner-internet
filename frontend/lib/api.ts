@@ -705,3 +705,19 @@ export const aiFindChains = (targetId: string) =>
     chains: { chain_name: string; severity: string; steps: string[]; impact: string; findings_used: string[] }[];
     findings_analyzed: number;
   }>(`/api/ai/find-chains/${targetId}`, {});
+
+// ---------------------------------------------------------------------------
+// Intigriti Researcher API
+// ---------------------------------------------------------------------------
+
+export const fetchIntigrtiMe = () =>
+  apiFetch<{ configured: boolean; ok: boolean; programs_accessible?: number; detail?: string }>("/api/intigriti/me");
+
+export const fetchIntigrtiPrograms = () =>
+  apiFetch<any>("/api/intigriti/programs", 20000);
+
+export const fetchIntigrtiActivities = () =>
+  apiFetch<any>("/api/intigriti/activities", 20000);
+
+export const importIntigrtiPrograms = () =>
+  API_POST<{ imported: number; updated: number; total_programs: number }>("/api/intigriti/import", {});
