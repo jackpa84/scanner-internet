@@ -22,10 +22,13 @@ from urllib.parse import urlparse, urlencode, parse_qs, urlunparse, quote
 
 import requests
 
+from app.payloads_integration import get_ssrf_test_payloads, get_ssrf_parameters
+
 logger = logging.getLogger("scanner.ssrf")
 
 SSRF_ENABLED = os.getenv("SSRF_SCANNER_ENABLED", "true").lower() in ("1", "true", "yes")
 SSRF_TIMEOUT = int(os.getenv("SSRF_TIMEOUT", "8"))
+USE_CHEATSHEET_PAYLOADS = os.getenv("SSRF_USE_CHEATSHEET_PAYLOADS", "true").lower() in ("1", "true", "yes")
 
 SSRF_PARAMS = {
     "url", "uri", "redirect", "redirect_url", "redirect_uri", "return", "return_url",
@@ -151,6 +154,97 @@ def _check_ssrf_response(resp: requests.Response, payload_type: str) -> dict[str
     return None
 
 
+def _test_ssrf_with_cheatsheet_payloads(
+    url: str,
+    param_name: str,
+    headers: dict,
+) -> list[dict[str, Any]]:
+    """
+    Test SSRF using payloads from bugbounty-cheatsheet.
+    
+    Tests with payloads from multiple categories:
+    - Localhost variations
+    - AWS metadata endpoints
+    - IPv6 variations
+    - Exotic protocol handlers
+    - Wildcard DNS services
+    
+    Returns list of findings if any SSRF is detected.
+    """
+    findings = []
+    
+    # Get all SSRF payloads from cheatsheet
+    all_cheatsheet_payloads = get_ssrf_test_payloads(target_type="all")
+    
+    for payload in all_cheatsheet_payloads:
+        test_url = _build_ssrf_url(url, param_name, payload)
+        
+        try:
+            resp = requests.get(
+                test_url, headers=headers,
+                timeout=SSRF_TIMEOUT, allow_redirects=True,
+            )
+            _stats["params_tested"] += 1
+            
+            # Check for various SSRF indicators
+            body = resp.text[:5000].lower()
+            
+            # AWS Metadata indicators
+            if any(ind in body for ind in ["ami-id", "instance-id", "iam", "security-credentials"]):
+                findings.append({
+                    "severity": "critical",
+                    "code": "ssrf_aws_metadata_cheatsheet",
+                    "title": "SSRF: AWS Metadata Access (bugbounty-cheatsheet)",
+                    "evidence": f"Param: {param_name} | Payload: {payload} | Status: {resp.status_code}"[:200],
+                    "ssrf_type": "cloud_metadata",
+                    "param_name": param_name,
+                    "payload": payload,
+                    "test_url": test_url,
+                    "source": "bugbounty_cheatsheet",
+                })
+                _stats["ssrf_found"] += 1
+                logger.info("[SSRF] AWS METADATA via cheatsheet payload in param '%s'", param_name)
+                break
+            
+            # Local file indicators
+            if any(ind in body for ind in ["root:", "daemon:", "/bin/", "/etc/"]):
+                findings.append({
+                    "severity": "high",
+                    "code": "ssrf_local_file_cheatsheet",
+                    "title": "SSRF: Local File Access (bugbounty-cheatsheet)",
+                    "evidence": f"Param: {param_name} | Payload: {payload} | Status: {resp.status_code}"[:200],
+                    "ssrf_type": "local_file_read",
+                    "param_name": param_name,
+                    "payload": payload,
+                    "test_url": test_url,
+                    "source": "bugbounty_cheatsheet",
+                })
+                break
+            
+            # Internal access indicators
+            if resp.status_code == 200 and len(body) > 100 and "127.0.0.1" not in url:
+                findings.append({
+                    "severity": "high",
+                    "code": "ssrf_internal_access_cheatsheet",
+                    "title": "SSRF: Internal Access (bugbounty-cheatsheet)",
+                    "evidence": f"Param: {param_name} | Payload: {payload} | Status: {resp.status_code} | Size: {len(resp.text)}"[:200],
+                    "ssrf_type": "internal_access",
+                    "param_name": param_name,
+                    "payload": payload,
+                    "test_url": test_url,
+                    "source": "bugbounty_cheatsheet",
+                })
+                break
+                
+        except requests.RequestException as e:
+            logger.debug("[SSRF] Cheatsheet payload test error: %s", str(e))
+            continue
+        
+        time.sleep(0.1)
+    
+    return findings
+
+
 def scan_url_for_ssrf(
     url: str,
     callback_host: str | None = None,
@@ -211,6 +305,12 @@ def scan_url_for_ssrf(
                 continue
 
             time.sleep(0.3)
+
+        # Test with bugbounty-cheatsheet payloads if enabled
+        if USE_CHEATSHEET_PAYLOADS and not findings:
+            cheatsheet_findings = _test_ssrf_with_cheatsheet_payloads(url, param_name, req_headers)
+            if cheatsheet_findings:
+                findings.extend(cheatsheet_findings)
 
         if callback_host:
             blind_payloads = [

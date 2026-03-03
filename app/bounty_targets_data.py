@@ -170,8 +170,8 @@ def _parse_bugcrowd(data: list[dict]) -> list[dict]:
             "url": full_url,
             "in_scope": in_scope_domains,
             "out_of_scope": out_scope_domains,
-            "has_bounty": prog.get("max_payout", 0) > 0,
-            "bounty_max": prog.get("max_payout"),
+            "has_bounty": (prog.get("max_payout") or 0) > 0,
+            "bounty_max": prog.get("max_payout") or 0,
             "source": "bounty-targets-data",
         })
 

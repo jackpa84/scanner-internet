@@ -351,7 +351,12 @@ class RedisCollection:
         return time.time()
 
     def _all(self):
-        raw = self._r.hgetall(self._dk)
+        if self._r is None:
+            return []
+        try:
+            raw = self._r.hgetall(self._dk)
+        except Exception:
+            return []
         out = []
         for data in raw.values():
             try:
@@ -438,7 +443,15 @@ class RedisCollection:
 
     # -- writes ---------------------------------------------------
 
+    def _check_redis(self):
+        if self._r is None:
+            from app.redis_store import get_redis
+            self._r = get_redis()
+        if self._r is None:
+            raise Exception("Redis unavailable")
+
     def insert_one(self, doc):
+        self._check_redis()
         if "_id" not in doc:
             doc["_id"] = str(ObjectId())
         else:
@@ -467,6 +480,7 @@ class RedisCollection:
         return _RM(ids)
 
     def update_one(self, filt, update, upsert=False):
+        self._check_redis()
         for doc in self._all():
             if _match(doc, filt):
                 self._apply(doc, update)
@@ -517,6 +531,7 @@ class RedisCollection:
         return _RU(0, 0)
 
     def delete_one(self, filt):
+        self._check_redis()
         for doc in self._all():
             if _match(doc, filt):
                 did = str(doc["_id"])
@@ -534,6 +549,7 @@ class RedisCollection:
         return _RD(0)
 
     def delete_many(self, filt):
+        self._check_redis()
         c = 0
         p = self._r.pipeline()
         for doc in self._all():
@@ -561,9 +577,14 @@ class RedisCollection:
     # -- reads ----------------------------------------------------
 
     def find_one(self, filt=None, projection=None):
+        if self._r is None:
+            return None
         if filt and "_id" in filt and not isinstance(filt["_id"], dict):
             did = str(filt["_id"])
-            raw = self._r.hget(self._dk, did)
+            try:
+                raw = self._r.hget(self._dk, did)
+            except Exception:
+                return None
             if raw is None:
                 return None
             doc = _loads(raw)
@@ -632,12 +653,22 @@ class RedisCollection:
         return self.find(filt, projection).sort(sort_key or "timestamp", sort_dir).limit(limit)
 
     def count_documents(self, filt):
-        if not filt:
-            return self._r.hlen(self._dk)
-        return sum(1 for d in self._all() if _match(d, filt))
+        if self._r is None:
+            return 0
+        try:
+            if not filt:
+                return self._r.hlen(self._dk)
+            return sum(1 for d in self._all() if _match(d, filt))
+        except Exception:
+            return 0
 
     def estimated_document_count(self):
-        return self._r.hlen(self._dk)
+        if self._r is None:
+            return 0
+        try:
+            return self._r.hlen(self._dk)
+        except Exception:
+            return 0
 
     def distinct(self, field, filt=None):
         vals = set()
@@ -850,7 +881,7 @@ _enrich_cache: EnrichmentCache | None = None
 _scan_counters: RedisCounters | None = None
 
 
-def init_redis() -> bool:
+def init_redis(max_retries: int = 10, retry_delay: float = 2.0) -> bool:
     global _redis_client, _ip_dedup, _enrich_cache, _scan_counters
     url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     if not url:
@@ -859,23 +890,30 @@ def init_redis() -> bool:
     with _init_lock:
         if _redis_client is not None:
             return True
-        try:
-            import redis as _rmod
-            _redis_client = _rmod.from_url(
-                url, decode_responses=True,
-            )
-            _redis_client.ping()
-            _ip_dedup = IPDeduplicator(_redis_client)
-            _enrich_cache = EnrichmentCache(_redis_client)
-            _scan_counters = RedisCounters(_redis_client, "scan")
-            logger.info("[redis_store] Redis OK: %s", url[:40])
-            return True
-        except Exception as e:
-            logger.error("[redis_store] Redis fail: %s", e)
-            return False
+        import redis as _rmod
+        for attempt in range(1, max_retries + 1):
+            try:
+                client = _rmod.from_url(url, decode_responses=True)
+                client.ping()
+                _redis_client = client
+                _ip_dedup = IPDeduplicator(_redis_client)
+                _enrich_cache = EnrichmentCache(_redis_client)
+                _scan_counters = RedisCounters(_redis_client, "scan")
+                logger.info("[redis_store] Redis OK: %s (attempt %d)", url[:40], attempt)
+                return True
+            except Exception as e:
+                logger.warning("[redis_store] Redis attempt %d/%d failed: %s", attempt, max_retries, e)
+                if attempt < max_retries:
+                    import time
+                    time.sleep(retry_delay)
+        logger.error("[redis_store] Redis unavailable after %d attempts", max_retries)
+        return False
 
 
 def get_redis():
+    global _redis_client
+    if _redis_client is None:
+        init_redis(max_retries=3, retry_delay=1.0)
     return _redis_client
 
 

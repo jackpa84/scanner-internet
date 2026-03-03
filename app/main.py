@@ -59,6 +59,29 @@ from app.ssrf_scanner import get_ssrf_stats
 from app.graphql_scanner import get_graphql_stats
 from app.race_condition_scanner import get_race_stats
 from app.report_generator import generate_h1_report, deduplicate_findings
+from app.vuln_processor_v2 import (
+    process_scan_vulnerabilities, deduplicate_vulnerabilities,
+    get_processed_vulnerabilities, mark_false_positive, get_processor_stats,
+)
+from app.report_processor import (
+    process_vulnerabilities_to_reports, get_processed_reports,
+    mark_report_submitted, get_report_stats,
+)
+from app.h1_submission import (
+    submit_report_to_h1, batch_submit_reports,
+    get_submission_stats, get_submission_queue,
+)
+from app.program_matcher import (
+    match_ip_to_programs, build_ip_program_mapping,
+    enrich_vulns_with_programs, get_programs_for_report,
+    filter_reports_by_eligibility, get_matcher_stats,
+)
+from app.program_matcher_async import (
+    match_ip_to_programs_cached, queue_ips_for_matching, process_ip_match_queue,
+    enrich_vuln_with_programs_async, queue_vulns_for_enrichment,
+    filter_report_to_programs_async, subscribe_to_channel,
+    start_program_matcher_worker,
+)
 from app.ai_analyzer import (
     AI_ENABLED as AI_ANALYZER_ENABLED,
     ai_write_report, ai_classify_finding, ai_classify_findings_batch,
@@ -479,6 +502,613 @@ def api_vuln_stats():
         "top_vulns": [{"template_id": v["_id"], "name": v["name"], "severity": v["severity"], "count": v["count"]} for v in top_vulns],
         "scanner": scan_stats,
     }
+
+
+@app.post("/api/vulns/process")
+def api_vuln_process(body: dict | None = None):
+    """
+    Process vulnerabilities from scan_results → vuln_results.
+    
+    Enrich with CVSS scores, PoC, remediation, confidence, etc.
+    
+    Body (optional):
+      {
+        "scan_id": "optional ObjectId of specific scan",
+        "batch_size": 50 (optional)
+      }
+    """
+    body = body or {}
+    scan_id = body.get("scan_id")
+    batch_size = body.get("batch_size", 50)
+    
+    results = process_scan_vulnerabilities(scan_id=scan_id, batch_size=batch_size)
+    
+    return {
+        "status": "processed",
+        "processed_scans": results["processed_scans"],
+        "processed_vulns": results["processed_vulns"],
+        "enriched": results["enriched"],
+        "skipped_duplicates": results["skipped_duplicates"],
+        "errors": results["errors"],
+    }
+
+
+@app.post("/api/vulns/deduplicate")
+def api_vuln_deduplicate():
+    """Remove duplicate vulnerabilities from vuln_results."""
+    results = deduplicate_vulnerabilities()
+    
+    return {
+        "status": "deduplicated",
+        "total_vulns": results["total_vulns"],
+        "duplicates_found": results["duplicates_found"],
+        "removed": results["removed"],
+    }
+
+
+@app.get("/api/vulns/processed")
+def api_vuln_processed(limit: int = 100, severity: str | None = None):
+    """Get processed and enriched vulnerabilities from vuln_results."""
+    limit = max(1, min(limit, 500))
+    vulns = get_processed_vulnerabilities(limit=limit, severity=severity)
+    
+    return {
+        "count": len(vulns),
+        "vulns": [
+            {
+                "id": str(v["_id"]),
+                "ip": v.get("ip"),
+                "title": v.get("title"),
+                "severity": v.get("severity"),
+                "confidence": v.get("confidence"),
+                "cvss_base": v.get("cvss_base"),
+                "type": v.get("type"),
+                "status": v.get("status"),
+                "timestamp": v.get("timestamp").isoformat() if v.get("timestamp") else None,
+            }
+            for v in vulns
+        ]
+    }
+
+
+@app.post("/api/vulns/{vuln_id}/mark-fp")
+def api_mark_false_positive(vuln_id: str):
+    """Mark a vulnerability as false positive."""
+    success = mark_false_positive(vuln_id)
+    
+    return {
+        "status": "marked" if success else "not_found",
+        "vuln_id": vuln_id,
+    }
+
+
+@app.get("/api/vulns/processor/stats")
+def api_processor_stats():
+    """Get vulnerability processor statistics."""
+    return get_processor_stats()
+
+
+@app.post("/api/reports/generate")
+def api_generate_reports(body: dict | None = None):
+    """
+    Generate HackerOne-formatted reports from processed vulnerabilities.
+    
+    Body (optional):
+      {
+        "limit": 50 (max vulns to process),
+        "severity_threshold": "low" (minimum severity)
+      }
+    """
+    body = body or {}
+    limit = body.get("limit", 50)
+    severity_threshold = body.get("severity_threshold", "low")
+    
+    results = process_vulnerabilities_to_reports(limit=limit, severity_threshold=severity_threshold)
+    
+    return {
+        "status": "generated",
+        "processed_vulns": results["processed_vulns"],
+        "reports_generated": results["reports_generated"],
+        "errors": results["errors"],
+    }
+
+
+@app.get("/api/reports")
+def api_get_reports(limit: int = 100, status: str = "draft", severity: str | None = None):
+    """Get generated reports."""
+    limit = max(1, min(limit, 500))
+    reports = get_processed_reports(limit=limit, status=status, severity=severity)
+    
+    return {
+        "count": len(reports),
+        "reports": [
+            {
+                "id": str(r["_id"]),
+                "ip": r.get("ip"),
+                "title": r.get("title"),
+                "severity": r.get("severity"),
+                "vulnerability_count": r.get("vulnerability_count"),
+                "status": r.get("status"),
+                "auto_submit_eligible": r.get("auto_submit_eligible"),
+                "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+            }
+            for r in reports
+        ]
+    }
+
+
+@app.post("/api/reports/{report_id}/submit")
+def api_submit_report(report_id: str, body: dict | None = None):
+    """Mark a report as submitted to HackerOne."""
+    body = body or {}
+    submission_id = body.get("h1_submission_id", "")
+    
+    success = mark_report_submitted(report_id, submission_id)
+    
+    return {
+        "status": "submitted" if success else "not_found",
+        "report_id": report_id,
+        "h1_submission_id": submission_id,
+    }
+
+
+@app.get("/api/reports/stats")
+def api_report_stats():
+    """Get report generation statistics."""
+    return get_report_stats()
+
+
+# ---------------------------------------------------------------------------
+# HackerOne Submission endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/h1/submit/{report_id}")
+def api_h1_submit(report_id: str, body: dict | None = None):
+    """
+    Submit a single report to HackerOne.
+    
+    Body (optional):
+      {
+        "dry_run": true (optional, validate without submitting)
+      }
+    """
+    body = body or {}
+    dry_run = body.get("dry_run", False)
+    
+    result = submit_report_to_h1(report_id, dry_run=dry_run)
+    
+    return result
+
+
+@app.post("/api/h1/batch-submit")
+def api_h1_batch_submit(body: dict | None = None):
+    """
+    Batch submit reports to HackerOne.
+    
+    Body (optional):
+      {
+        "limit": 10 (max reports),
+        "auto_only": false (only auto-eligible),
+        "dry_run": false (validate without submitting)
+      }
+    """
+    body = body or {}
+    limit = body.get("limit", 10)
+    auto_only = body.get("auto_only", False)
+    dry_run = body.get("dry_run", False)
+    
+    results = batch_submit_reports(limit=limit, auto_only=auto_only, dry_run=dry_run)
+    
+    return {
+        "status": "batch_submitted",
+        "submitted": results["submitted"],
+        "duplicates": results["duplicates"],
+        "errors": results["errors"],
+        "skipped": results["skipped"],
+        "details": results["details"],
+    }
+
+
+@app.get("/api/h1/queue")
+def api_h1_queue():
+    """
+    Get reports waiting in submission queue.
+    """
+    queue = get_submission_queue()
+    
+    return {
+        "count": len(queue),
+        "reports": [
+            {
+                "id": str(r["_id"]),
+                "ip": r.get("ip"),
+                "title": r.get("title"),
+                "severity": r.get("severity"),
+                "vulnerability_count": r.get("vulnerability_count"),
+            }
+            for r in queue
+        ]
+    }
+
+
+@app.get("/api/h1/stats")
+def api_h1_stats():
+    """
+    Get HackerOne submission statistics.
+    """
+    return get_submission_stats()
+
+
+# ---------------------------------------------------------------------------
+# Gap 1: Bounty Program Targeting endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/api/programs/match-ip")
+def api_programs_match_ip(body: dict):
+    """
+    Match a single IP against all loaded bounty programs.
+    
+    Body:
+      {
+        "ip": "1.2.3.4"  (required)
+      }
+    
+    Returns:
+      [
+        {
+          "program_id": str,
+          "platform": str,
+          "name": str,
+          "scope_match": str,  ("domain", "cidr", etc)
+          "offers_bounties": bool,
+          "min_bounty": int,
+          "max_bounty": int,
+        },
+        ...
+      ]
+    """
+    ip = (body.get("ip") or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="ip is required")
+    
+    programs = match_ip_to_programs(ip)
+    
+    return {
+        "ip": ip,
+        "programs_found": len(programs),
+        "programs": programs,
+    }
+
+
+@app.post("/api/programs/build-mapping")
+def api_programs_build_mapping(body: dict | None = None):
+    """
+    Build complete IP → programs mapping for all discovered IPs.
+    
+    Body (optional):
+      {
+        "limit": 100  (max IPs to process, None = all)
+      }
+    
+    Returns:
+      {
+        "ips_processed": int,
+        "ips_with_matches": int,
+        "program_matches": int,
+        "unique_programs": int,
+        "mappings": { "ip": [...programs...] },
+        "stats_by_program": { "program_id": {...} },
+      }
+    """
+    body = body or {}
+    limit = body.get("limit")
+    
+    result = build_ip_program_mapping(limit=limit)
+    
+    return result
+
+
+@app.post("/api/vulns/enrich-with-programs")
+def api_vulns_enrich_with_programs(body: dict | None = None):
+    """
+    Enrich all vulnerabilities with program eligibility information.
+    
+    For each vulnerability, determine which programs it's eligible for
+    based on the target IP's program associations.
+    
+    Body (optional):
+      {
+        "limit": 50  (max vulns to enrich, None = all)
+      }
+    
+    Returns:
+      {
+        "vulns_processed": int,
+        "vulns_with_programs": int,
+        "program_assignments": int,
+        "errors": int,
+      }
+    """
+    body = body or {}
+    limit = body.get("limit")
+    
+    result = enrich_vulns_with_programs(limit=limit)
+    
+    return result
+
+
+@app.get("/api/reports/{report_id}/programs")
+def api_reports_programs(report_id: str):
+    """
+    Get eligible programs for a specific report.
+    
+    Returns programs the report can be submitted to based on the
+    report's IP and program scopes.
+    """
+    programs = get_programs_for_report(report_id)
+    
+    return {
+        "report_id": report_id,
+        "programs_eligible": len(programs),
+        "programs": programs,
+    }
+
+
+@app.get("/api/reports/by-program")
+def api_reports_by_program(body: dict | None = None):
+    """
+    Filter all generated reports by program eligibility.
+    
+    Returns program-specific report collections ready for submission.
+    
+    Returns:
+      {
+        "total_reports": int,
+        "reports_with_programs": int,
+        "submitted": int,
+        "ready_for_submission": [
+          {
+            "report_id": str,
+            "ip": str,
+            "severity": str,
+            "programs": [...],
+            "status": str,
+          },
+          ...
+        ]
+      }
+    """
+    body = body or {}
+    limit = body.get("limit")
+    
+    result = filter_reports_by_eligibility(limit=limit)
+    
+    return result
+
+
+@app.get("/api/programs/matcher/stats")
+def api_programs_matcher_stats():
+    """
+    Get program matching statistics.
+    """
+    return get_matcher_stats()
+
+
+# ---------------------------------------------------------------------------
+# Gap 1: Async Program Targeting (Redis → Pub/Sub → MongoDB)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/programs/match-ip-async")
+def api_programs_match_ip_async(body: dict):
+    """
+    Match IP to programs with Redis caching + Pub/Sub notifications.
+    
+    1. Checks Redis cache first
+    2. If not cached, computes and stores (24hr TTL)
+    3. Publishes via Pub/Sub for real-time updates
+    4. Fast response from Redis
+    
+    Body:
+      {
+        "ip": "1.2.3.4"  (required),
+        "use_cache": true  (optional, default: true)
+      }
+    """
+    ip = (body.get("ip") or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="ip is required")
+    
+    use_cache = body.get("use_cache", True)
+    programs = match_ip_to_programs_cached(ip, use_cache=use_cache)
+    
+    return {
+        "ip": ip,
+        "cached": use_cache,
+        "programs_found": len(programs),
+        "programs": programs,
+        "source": "redis_cache",
+    }
+
+
+@app.post("/api/programs/queue-ips")
+def api_queue_ips_for_matching(body: dict):
+    """
+    Queue multiple IPs for background matching (async).
+    
+    Background worker will process these and publish updates
+    via Pub/Sub channel 'programs:matched'.
+    
+    Body:
+      {
+        "ips": ["1.2.3.4", "5.6.7.8", ...]  (required)
+      }
+    
+    Returns:
+      {
+        "queued": int,
+        "channel": "programs:matched"
+      }
+    """
+    ips = body.get("ips", [])
+    if not isinstance(ips, list) or not ips:
+        raise HTTPException(status_code=400, detail="ips must be a non-empty list")
+    
+    queued = queue_ips_for_matching(ips)
+    
+    return {
+        "queued": queued,
+        "channel": "programs:matched",
+        "subscribe": "/api/programs/subscribe/matched"
+    }
+
+
+@app.post("/api/programs/process-queue")
+def api_process_queue_manual(body: dict | None = None):
+    """
+    Manually trigger processing of IP matching queue.
+    
+    Normally runs in background, but can be triggered manually.
+    
+    Body (optional):
+      {
+        "batch_size": 50  (default: 50)
+      }
+    """
+    body = body or {}
+    batch_size = body.get("batch_size", 50)
+    
+    result = process_ip_match_queue(batch_size=batch_size)
+    
+    return {
+        "processed": result["processed"],
+        "matched": result["matched"],
+        "cached": result["cached"],
+        "items_ready_for_mongo": len(result["ready_for_mongo"]),
+    }
+
+
+@app.post("/api/vulns/enrich-async")
+def api_vulns_enrich_async(body: dict):
+    """
+    Enrich single vulnerability with programs (async via Pub/Sub).
+    
+    1. Redis stores the enrichment immediately
+    2. Pub/Sub publishes for real-time updates
+    3. Background worker may persist to MongoDB
+    
+    Body:
+      {
+        "vuln_id": "...",  (required, ObjectId as string)
+        "ip": "1.2.3.4"  (required)
+      }
+    """
+    vuln_id = (body.get("vuln_id") or "").strip()
+    ip = (body.get("ip") or "").strip()
+    
+    if not vuln_id or not ip:
+        raise HTTPException(status_code=400, detail="vuln_id and ip are required")
+    
+    result = enrich_vuln_with_programs_async(vuln_id, ip)
+    
+    return {
+        "vuln_id": vuln_id,
+        "ip": ip,
+        "programs_found": result["programs_found"],
+        "programs": result["programs"],
+        "source": "redis_cache",
+        "channel": "vulns:enriched",
+    }
+
+
+@app.post("/api/vulns/queue-for-enrichment")
+def api_queue_vulns_for_enrichment(body: dict):
+    """
+    Queue vulnerabilities for background enrichment (async).
+    
+    Body:
+      {
+        "vulns": [
+          {"_id": "...", "ip": "1.2.3.4"},
+          ...
+        ]
+      }
+    """
+    vulns = body.get("vulns", [])
+    if not isinstance(vulns, list) or not vulns:
+        raise HTTPException(status_code=400, detail="vulns must be a non-empty list")
+    
+    queued = queue_vulns_for_enrichment(vulns)
+    
+    return {
+        "queued": queued,
+        "channel": "vulns:enriched",
+        "subscribe": "/api/programs/subscribe/enriched"
+    }
+
+
+@app.post("/api/reports/{report_id}/filter-programs-async")
+def api_filter_report_async(report_id: str, body: dict | None = None):
+    """
+    Filter report to eligible programs (async via Pub/Sub).
+    
+    1. Redis stores the filtering immediately
+    2. Pub/Sub publishes for real-time updates
+    3. Background worker may persist to MongoDB
+    """
+    body = body or {}
+    ip = (body.get("ip") or "").strip()
+    
+    if not ip:
+        raise HTTPException(status_code=400, detail="ip is required in body")
+    
+    result = filter_report_to_programs_async(report_id, ip)
+    
+    return {
+        "report_id": report_id,
+        "ip": ip,
+        "eligible_programs": result["eligible_programs"],
+        "programs": result["programs"],
+        "source": "redis_cache",
+        "channel": "reports:filtered",
+    }
+
+
+@app.get("/api/programs/subscribe/{channel}")
+def api_subscribe_to_channel(channel: str, timeout: int = 60):
+    """
+    Subscribe to Pub/Sub channel and receive messages (polling-style).
+    
+    Supported channels:
+      - programs:matched  (IP matching results)
+      - vulns:enriched  (Vulnerability enrichments)
+      - reports:filtered  (Report filtering results)
+      - stats:updated  (Overall statistics updates)
+    
+    Query params:
+      - timeout: Seconds to wait for messages (default: 60)
+    
+    For real applications, use WebSocket instead of polling.
+    """
+    if channel not in ["programs:matched", "vulns:enriched", "reports:filtered", "stats:updated"]:
+        raise HTTPException(status_code=400, detail=f"Invalid channel: {channel}")
+    
+    timeout = min(max(1, timeout), 300)  # 1-300 seconds
+    messages = subscribe_to_channel(channel, timeout=timeout)
+    
+    return {
+        "channel": channel,
+        "messages_received": len(messages),
+        "messages": messages,
+    }
+
+
+@app.get("/api/programs/matcher/stats/async")
+def api_programs_matcher_stats_async():
+    """
+    Get program matcher async statistics.
+    """
+    from app.program_matcher_async import get_matcher_stats as get_async_stats
+    return get_async_stats()
 
 
 @app.get("/api/vulns/ip/{ip}")
@@ -1550,7 +2180,7 @@ def api_intigriti_program_detail(program_id: str):
 
 
 @app.get("/api/intigriti/activities")
-def api_intigriti_activities():
+def api_intigriti_activities():[TRUNCATED]
     """Get recent Intigriti program activities (scope changes, etc.)."""
     data = _intigriti_request("/program-activities")
     return data
@@ -1783,4 +2413,5 @@ def on_startup():
     start_cve_monitor()
     start_roi_tracker()
     start_bounty_data_sync()
-    logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData rodando")
+    start_program_matcher_worker()
+    logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData + ProgramMatcher rodando")

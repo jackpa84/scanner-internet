@@ -33,6 +33,7 @@ const PLATFORM_OPTS = [
   { value: "bugcrowd", label: "Bugcrowd" },
   { value: "intigriti", label: "Intigriti" },
   { value: "yeswehack", label: "YesWeHack" },
+  { value: "bughunt", label: "BugHunt" },
   { value: "other", label: "Outra" },
 ];
 
@@ -282,6 +283,41 @@ function ReportActions({ targetId, program, target }: {
       ].filter(Boolean).join("\n");
     }
 
+    if (platform === "bughunt") {
+      const findings = target.recon_checks?.findings ?? [];
+      const cweList = findings.map(f => f.code).filter(Boolean).join(", ");
+      return [
+        `# ${title}`,
+        "",
+        `## Informações do Ativo`,
+        `- **Domínio:** ${target.domain}`,
+        `- **URL:** ${target.httpx?.url || `https://${target.domain}`}`,
+        `- **IPs:** ${(target.ips ?? []).join(", ") || "N/A"}`,
+        `- **Status HTTP:** ${target.httpx?.status_code ?? "N/A"}`,
+        "",
+        `## Severidade`,
+        `**${severity.toUpperCase()}**`,
+        cweList ? `\n**CWE:** ${cweList}` : "",
+        "",
+        `## Descrição da Vulnerabilidade`,
+        body,
+        "",
+        `## Impacto`,
+        impact || "A exploração desta vulnerabilidade pode comprometer a segurança do ativo e dos dados dos usuários.",
+        "",
+        `## Evidências e Prova de Conceito`,
+        findings.length > 0
+          ? findings.map(f => `- **[${(f.severity || "").toUpperCase()}]** ${f.title}${f.evidence ? `\n  Evidência: \`${f.evidence}\`` : ""}`).join("\n")
+          : "- Anexar screenshots ou vídeo demonstrando a exploração.",
+        "",
+        `## Sugestão de Correção`,
+        "Consulte a seção de remediação no report completo acima.",
+        "",
+        `---`,
+        `*Report gerado por Scanner Bounty*`,
+      ].filter(Boolean).join("\n");
+    }
+
     return `# ${title}\n\n${body}`;
   };
 
@@ -290,6 +326,7 @@ function ReportActions({ targetId, program, target }: {
     { id: "bugcrowd", label: "Bugcrowd", icon: "🟠", color: "border-orange-500/30 bg-orange-500/5 hover:bg-orange-500/10 text-orange-400" },
     { id: "intigriti", label: "Intigriti", icon: "🔵", color: "border-blue-500/30 bg-blue-500/5 hover:bg-blue-500/10 text-blue-400" },
     { id: "yeswehack", label: "YesWeHack", icon: "🟡", color: "border-yellow-500/30 bg-yellow-500/5 hover:bg-yellow-500/10 text-yellow-400" },
+    { id: "bughunt", label: "BugHunt", icon: "🇧🇷", color: "border-emerald-500/30 bg-emerald-500/5 hover:bg-emerald-500/10 text-emerald-400" },
     { id: "markdown", label: "Markdown", icon: "📋", color: "border-[var(--border)] bg-white/[0.02] hover:bg-white/[0.05] text-[var(--foreground)]" },
   ];
 
