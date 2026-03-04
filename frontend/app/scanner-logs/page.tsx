@@ -1,0 +1,1 @@
+Criei uma página React para exibir os logs recebidos via WebSocket.

@@ -1,4 +1,6 @@
 # Otimizado para M4 Pro (12 cores, 24GB RAM)
+# IMPORTANTE: Aumente o Docker Desktop para 16GB+ de RAM em:
+#   Docker Desktop → Settings → Resources → Memory → 16384 MB
 services:
   redis:
     image: redis:7-alpine
@@ -8,21 +10,26 @@ services:
       - "6379:6379"
     command: >
       redis-server
-      --maxmemory 4gb
+      --maxmemory 2gb
       --maxmemory-policy allkeys-lru
       --appendonly yes
       --appendfsync everysec
+      --no-appendfsync-on-rewrite yes
       --save 300 10
       --save 60 10000
-      --tcp-backlog 4096
+      --tcp-backlog 8192
       --hz 100
       --dynamic-hz yes
       --lazyfree-lazy-eviction yes
       --lazyfree-lazy-expire yes
       --lazyfree-lazy-server-del yes
-      --io-threads 4
+      --lazyfree-lazy-user-del yes
+      --io-threads 8
       --io-threads-do-reads yes
       --activedefrag yes
+      --maxmemory-samples 10
+      --activerehashing yes
+      --lfu-decay-time 1
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -38,10 +45,10 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 5g
+          memory: 2.5g
         reservations:
           cpus: "0.5"
-          memory: 1g
+          memory: 512m
 
   app:
     build: .
@@ -50,6 +57,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -69,7 +82,7 @@ services:
       - net.ipv4.ip_local_port_range=1024 65535
       - net.ipv4.tcp_fin_timeout=10
       - net.ipv4.tcp_keepalive_time=60
-      - net.core.somaxconn=8192
+      - net.core.somaxconn=16384
     env_file:
       - .env
     environment:
@@ -82,16 +95,18 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONOPTIMIZE: "2"
       PYTHONDONTWRITEBYTECODE: "1"
-      MALLOC_ARENA_MAX: "4"
-      UV_THREADPOOL_SIZE: "32"
+      PYTHONASYNCIODEBUG: "0"
+      PYTHONWARNINGS: "ignore::DeprecationWarning"
+      MALLOC_ARENA_MAX: "2"
+      UV_THREADPOOL_SIZE: "64"
 
       # --- Network scanner (M4 Pro: 12 cores) ---
-      NUM_WORKERS: "2000"
+      NUM_WORKERS: "500"
       SCAN_INTERVAL: "0"
       PRESCAN_TIMEOUT: "0.12"
-      BATCH_SIZE: "500"
-      BATCH_FLUSH_INTERVAL: "0.3"
-      MAX_CONCURRENT_CONNS: "60000"
+      BATCH_SIZE: "1000"
+      BATCH_FLUSH_INTERVAL: "0.2"
+      MAX_CONCURRENT_CONNS: "80000"
 
       # --- Enrichment ---
       SHODAN_RPS: "25"
@@ -103,26 +118,33 @@ services:
       MASSCAN_RATE: "300000"
 
       # --- Vuln scanner (M4 Pro: parallel) ---
-      VULN_WORKERS: "20"
+      VULN_WORKERS: "30"
       VULN_AUTO_SCAN: "true"
-      VULN_AUTO_MIN_SCORE: "35"
+      VULN_AUTO_MIN_SCORE: "30"
       NUCLEI_SEVERITY: "critical,high,medium"
       NUCLEI_TIMEOUT: "90"
-      NUCLEI_RATE_LIMIT: "800"
-      NUCLEI_BULK_SIZE: "150"
-      NUCLEI_CONCURRENCY: "75"
+      NUCLEI_RATE_LIMIT: "1200"
+      NUCLEI_BULK_SIZE: "200"
+      NUCLEI_CONCURRENCY: "100"
       NMAP_TIMEOUT: "60"
 
       # --- Bounty recon (M4 Pro: max parallel) ---
       BOUNTY_MODE: "true"
-      BOUNTY_RECON_INTERVAL: "7200"
-      BOUNTY_RECON_WORKERS: "20"
+      BOUNTY_RECON_INTERVAL: "3600"
+      BOUNTY_RECON_WORKERS: "30"
       SUBFINDER_TIMEOUT: "90"
       HTTPX_TIMEOUT: "90"
-      HTTPX_THREADS: "150"
+      HTTPX_THREADS: "250"
 
       # --- HackerOne ---
       HACKERONE_API_USERNAME: "jackpa1984"
+      HACKERONE_API_TOKEN: "${HACKERONE_API_TOKEN:-}"
+      H1_API_TOKEN: "${HACKERONE_API_TOKEN:-}"
+      H1_PROGRAM_HANDLE: "${H1_PROGRAM_HANDLE:-}"
+      H1_AUTO_SUBMIT: "true"
+      H1_AUTO_SUBMIT_INTERVAL: "300"
+      H1_AUTO_SUBMIT_BATCH: "10"
+      H1_AUTO_SUBMIT_DRY_RUN: "${H1_DRY_RUN:-false}"
 
       # --- Tools ---
       BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
@@ -136,7 +158,7 @@ services:
       # --- Tools (fast) ---
       KATANA_TIMEOUT: "60"
       KATANA_DEPTH: "3"
-      KATANA_CONCURRENCY: "30"
+      KATANA_CONCURRENCY: "60"
       GAU_TIMEOUT: "30"
 
       # --- Intigriti ---
@@ -149,7 +171,7 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}"
       OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-xploiter/the-xploiter}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-deepseek-r1:7b}"
       AI_MAX_TOKENS: "${AI_MAX_TOKENS:-3000}"
       AI_TEMPERATURE: "${AI_TEMPERATURE:-0.1}"
 
@@ -177,6 +199,18 @@ services:
       ROI_TRACKER_ENABLED: "true"
       CUSTOM_NUCLEI_TEMPLATES: "/app/nuclei-custom-templates"
 
+      # --- Platform Watcher (madmax-hunter scraping) ---
+      PLATFORM_WATCHER_ENABLED: "true"
+      PLATFORM_WATCHER_INTERVAL: "1800"
+      PLATFORM_WATCHER_PLATFORMS: "hackerone,bugcrowd,intigriti,yeswehack,bughunt"
+      BUGCROWD_API_TOKEN: "${BUGCROWD_API_TOKEN:-}"
+      YESWEHACK_TOKEN: "${YESWEHACK_TOKEN:-}"
+      BUGHUNT_EMAIL: "${BUGHUNT_EMAIL:-}"
+      BUGHUNT_PASSWORD: "${BUGHUNT_PASSWORD:-}"
+      CAPSOLVER_API_KEY: "${CAPSOLVER_API_KEY:-}"
+      DISCORD_WEBHOOK_URL: "${DISCORD_WEBHOOK_URL:-}"
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL:-}"
+
       # --- Telegram ---
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
@@ -189,12 +223,12 @@ services:
       - app.main:app
       - --host=0.0.0.0
       - --port=5000
+      - --loop=uvloop
       - --log-level=info
-      - --timeout-keep-alive=30
-      - --limit-concurrency=500
-      - --backlog=4096
-      - --reload
-      - --reload-dir=/app/app
+      - --timeout-keep-alive=120
+      - --limit-concurrency=1000
+      - --backlog=8192
+      - --timeout-graceful-shutdown=10
     logging:
       driver: "json-file"
       options:
@@ -205,11 +239,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "10.0"
-          memory: 16g
+          cpus: "11.0"
+          memory: 5g
         reservations:
-          cpus: "4.0"
-          memory: 4g
+          cpus: "6.0"
+          memory: 2g
 
   frontend:
     build:
@@ -218,7 +252,8 @@ services:
     platform: linux/arm64
     container_name: scanner_frontend
     depends_on:
-      - app
+      app:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
@@ -227,6 +262,7 @@ services:
       NODE_ENV: development
       WATCHPACK_POLLING: "true"
       CHOKIDAR_USEPOLLING: "true"
+      NODE_OPTIONS: "--max-old-space-size=1536"
     volumes:
       - ./frontend:/app
       - /app/node_modules

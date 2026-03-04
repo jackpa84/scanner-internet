@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export AWS_PAGER=""
 
 # ─── Config ──────────────────────────────────────────────────────────
 REGION="us-east-1"
-INSTANCE_TYPE="t3.micro"
+INSTANCE_TYPE="t3.micro"    # 1 vCPU, 1GB RAM — Free Tier
 KEY_NAME="scanner-key"
 SG_NAME="scanner-sg"
 APP_NAME="scanner-internet"
@@ -41,7 +42,7 @@ if ! aws ec2 describe-security-groups --group-names "$SG_NAME" --region "$REGION
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
     --protocol tcp --port 22 --cidr 0.0.0.0/0
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
-    --protocol tcp --port 5000 --cidr 0.0.0.0/0
+    --protocol tcp --port 5001 --cidr 0.0.0.0/0
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
     --protocol tcp --port 3000 --cidr 0.0.0.0/0
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
@@ -68,12 +69,17 @@ echo "==> AMI: $AMI_ID"
 USER_DATA=$(cat <<'USERDATA'
 #!/bin/bash
 set -e
-# Swap de 2GB (t2.micro tem só 1GB RAM)
-fallocate -l 2G /swapfile
+# Swap de 4GB para compensar RAM limitada
+fallocate -l 4G /swapfile
 chmod 600 /swapfile
 mkswap /swapfile
 swapon /swapfile
 echo '/swapfile none swap sw 0 0' >> /etc/fstab
+# Tuning
+sysctl -w vm.swappiness=10
+sysctl -w net.core.somaxconn=4096
+sysctl -w net.ipv4.tcp_tw_reuse=1
+echo 'vm.swappiness=10' >> /etc/sysctl.conf
 
 apt-get update -y
 apt-get install -y docker.io docker-compose-v2
@@ -112,62 +118,106 @@ echo "==> IP Público: $PUBLIC_IP"
 echo "==> Aguardando SSH ficar pronto (~60s)..."
 sleep 60
 
+SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ${KEY_NAME}.pem"
+
 for i in $(seq 1 10); do
-  if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i "${KEY_NAME}.pem" "ubuntu@${PUBLIC_IP}" "echo ok" 2>/dev/null; then
+  if ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" "echo ok" 2>/dev/null; then
     break
   fi
   echo "    Tentativa $i/10..."
   sleep 10
 done
 
-# ─── 7. Copiar arquivos do projeto via SCP ───────────────────────────
+# ─── 7. Copiar arquivos do projeto (deploy filtrado) ─────────────────
 echo "==> Copiando projeto para EC2..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEPLOY_IGNORE_FILE="${SCRIPT_DIR}/.deployignore"
 
-ssh -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" "ubuntu@${PUBLIC_IP}" "mkdir -p ~/app"
+ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" "mkdir -p ~/app"
 
-scp -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" -r \
-  "${SCRIPT_DIR}/docker-compose.yml" \
-  "${SCRIPT_DIR}/Dockerfile" \
-  "${SCRIPT_DIR}/pyproject.toml" \
-  "${SCRIPT_DIR}/app" \
-  "${SCRIPT_DIR}/tools" \
-  "ubuntu@${PUBLIC_IP}:~/app/"
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "[ERRO] rsync não encontrado localmente. Instale rsync para deploy filtrado."
+  exit 1
+fi
 
-# Copiar poetry.lock se existir
-[ -f "${SCRIPT_DIR}/poetry.lock" ] && \
-  scp -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" \
-    "${SCRIPT_DIR}/poetry.lock" "ubuntu@${PUBLIC_IP}:~/app/"
+rsync -az --delete \
+  --exclude-from="${DEPLOY_IGNORE_FILE}" \
+  -e "ssh ${SSH_OPTS}" \
+  "${SCRIPT_DIR}/" "ubuntu@${PUBLIC_IP}:~/app/"
 
-# Copiar frontend
-scp -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" -r \
-  "${SCRIPT_DIR}/frontend" \
-  "ubuntu@${PUBLIC_IP}:~/app/"
-
-# Remover node_modules do frontend (será instalado no container)
-ssh -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" "ubuntu@${PUBLIC_IP}" \
+# Limpar artefatos de dev do frontend
+ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" \
   "rm -rf ~/app/frontend/node_modules ~/app/frontend/.next"
 
-# ─── 8. Ajustar NEXT_PUBLIC_API_URL e subir ─────────────────────────
-echo "==> Subindo containers..."
-ssh -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" "ubuntu@${PUBLIC_IP}" bash <<REMOTE
+# ─── 8. Ajustar configs para EC2 e subir ────────────────────────────
+echo "==> Ajustando configurações para EC2..."
+ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" bash <<REMOTE
 set -e
 cd ~/app
 
-# Apontar frontend para o IP público da EC2
-# Criar .env se não existir
-touch .env
+# Aguardar Docker ficar pronto (user-data pode estar rodando)
+for i in \$(seq 1 30); do
+  if sudo docker info >/dev/null 2>&1; then break; fi
+  echo "  Docker ainda não pronto, aguardando... (\$i/30)"
+  sleep 5
+done
 
-# Ajustar para IP público e t3.micro (1GB RAM)
-sed -i "s|NEXT_PUBLIC_API_URL:.*|NEXT_PUBLIC_API_URL: http://${PUBLIC_IP}:5000|" docker-compose.yml
-sed -i 's|NUM_WORKERS: "200"|NUM_WORKERS: "20"|' docker-compose.yml
-sed -i 's|VULN_WORKERS: "3"|VULN_WORKERS: "1"|' docker-compose.yml
-sed -i 's|BOUNTY_RECON_WORKERS: "2"|BOUNTY_RECON_WORKERS: "1"|' docker-compose.yml
+# ── Ajustar docker-compose.yml para EC2 t2.micro (1 vCPU, 1GB RAM) ──
 
-# Build e start
-sudo docker compose up -d --build 2>&1 | tail -5
+# Frontend: apontar para IP público
+sed -i 's|NEXT_PUBLIC_API_URL: ""|NEXT_PUBLIC_API_URL: "http://${PUBLIC_IP}:5001"|' docker-compose.yml
 
-echo "Containers:"
+# Redis: MUITO agressivo (128MB max, 1 thread)
+sed -i 's|--maxmemory 2gb|--maxmemory 128mb|' docker-compose.yml
+sed -i 's|--io-threads 8|--io-threads 1|' docker-compose.yml
+sed -i 's|--hz 100|--hz 10|' docker-compose.yml
+
+# Redis limits
+sed -i 's|cpus: "2.0"|cpus: "0.3"|' docker-compose.yml
+sed -i 's|memory: 2.5g|memory: 256m|' docker-compose.yml
+
+# App: MUITO reduzido
+sed -i 's|NUM_WORKERS: "500"|NUM_WORKERS: "2"|' docker-compose.yml
+sed -i 's|MAX_CONCURRENT_CONNS: "80000"|MAX_CONCURRENT_CONNS: "20"|' docker-compose.yml
+sed -i 's|MASSCAN_RATE: "300000"|MASSCAN_RATE: "100"|' docker-compose.yml
+sed -i 's|VULN_WORKERS: "30"|VULN_WORKERS: "1"|' docker-compose.yml
+sed -i 's|BOUNTY_RECON_WORKERS: "30"|BOUNTY_RECON_WORKERS: "1"|' docker-compose.yml
+sed -i 's|HTTPX_THREADS: "250"|HTTPX_THREADS: "2"|' docker-compose.yml
+sed -i 's|NUCLEI_RATE_LIMIT: "1200"|NUCLEI_RATE_LIMIT: "10"|' docker-compose.yml
+sed -i 's|NUCLEI_BULK_SIZE: "200"|NUCLEI_BULK_SIZE: "5"|' docker-compose.yml
+sed -i 's|NUCLEI_CONCURRENCY: "100"|NUCLEI_CONCURRENCY: "2"|' docker-compose.yml
+sed -i 's|KATANA_CONCURRENCY: "60"|KATANA_CONCURRENCY: "2"|' docker-compose.yml
+sed -i 's|UV_THREADPOOL_SIZE: "64"|UV_THREADPOOL_SIZE: "2"|' docker-compose.yml
+sed -i 's|BATCH_SIZE: "1000"|BATCH_SIZE: "10"|' docker-compose.yml
+sed -i 's|--limit-concurrency=1000|--limit-concurrency=50|' docker-compose.yml
+sed -i 's|--backlog=8192|--backlog=256|' docker-compose.yml
+
+# App resource limits (máximo 0.7 CPU, 400MB)
+sed -i 's|cpus: "11.0"|cpus: "0.7"|' docker-compose.yml
+sed -i 's|memory: 5g|memory: 400m|' docker-compose.yml
+sed -i 's|cpus: "6.0"|cpus: "0.2"|' docker-compose.yml
+sed -i 's|memory: 2g|memory: 200m|' docker-compose.yml
+
+# Frontend resource limits (128MB max)
+sed -i 's|NODE_OPTIONS: "--max-old-space-size=1536"|NODE_OPTIONS: "--max-old-space-size=128"|' docker-compose.yml
+
+# Ulimits MUITO pequenos para t2.micro
+sed -i 's|soft: 131072|soft: 1024|g' docker-compose.yml
+sed -i 's|hard: 131072|hard: 2048|g' docker-compose.yml
+sed -i 's|soft: 65536|soft: 512|g' docker-compose.yml
+sed -i 's|hard: 65536|hard: 1024|g' docker-compose.yml
+
+# Remover platform linux/arm64 (EC2 é amd64)
+sed -i '/platform: linux\/arm64/d' docker-compose.yml
+
+echo "==> Configurações ajustadas para EC2"
+
+# ── Build e start ──
+echo "==> Fazendo build e start..."
+sudo docker compose up -d --build 2>&1 | tail -20
+
+echo ""
+echo "==> Containers:"
 sudo docker compose ps
 REMOTE
 
@@ -180,11 +230,11 @@ echo "  Instância:   $INSTANCE_ID"
 echo "  IP Público:  $PUBLIC_IP"
 echo ""
 echo "  Frontend:    http://${PUBLIC_IP}:3000"
-echo "  API:         http://${PUBLIC_IP}:5000"
-echo "  MongoDB:     mongodb://user:password@${PUBLIC_IP}:27017/scanner_db?authSource=admin"
+echo "  API:         http://${PUBLIC_IP}:5001"
 echo ""
 echo "  SSH:         ssh -i ${KEY_NAME}.pem ubuntu@${PUBLIC_IP}"
 echo "  Logs:        ssh -i ${KEY_NAME}.pem ubuntu@${PUBLIC_IP} 'cd ~/app && sudo docker compose logs -f'"
+echo "  Rebuild:     ssh -i ${KEY_NAME}.pem ubuntu@${PUBLIC_IP} 'cd ~/app && sudo docker compose up -d --build'"
 echo ""
-echo "  Custo estimado: Free Tier (t3.micro)"
+echo "  Tipo: $INSTANCE_TYPE (~\$0.02/h = ~\$15/mês)"
 echo ""

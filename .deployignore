@@ -1,0 +1,48 @@
+# VCS / editor
+.git/
+.gitignore
+.cursor/
+.vscode/
+.idea/
+
+# Python cache / env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+
+# Node build cache
+node_modules/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/dist/
+
+# Logs / temp
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Secrets and local keys (keep .env only)
+*.pem
+credentials.json
+.env.*
+
+# Docs / scripts not needed in runtime deploy
+*.md
+*.txt
+clean.sh
+deploy-aws.sh
+deploy-worker.sh
+generate_project.sh
+limpar-*.sh
+verify_*.py
+test_*.py

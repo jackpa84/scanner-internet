@@ -56,7 +56,7 @@ function authHeaders(): Record<string, string> {
 
 async function apiFetch<T>(path: string, timeoutMs = 15000): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(`Timeout ${timeoutMs}ms: ${path}`), timeoutMs);
   try {
     const res = await fetch(`${API_BASE}${path}`, {
       cache: "no-store",
@@ -68,8 +68,17 @@ async function apiFetch<T>(path: string, timeoutMs = 15000): Promise<T> {
       if (typeof window !== "undefined") window.location.href = "/";
       throw new Error("Sessao expirada");
     }
-    if (!res.ok) throw new Error(`API ${path}: ${res.status}`);
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const detail = body ? (() => { try { return JSON.parse(body).detail; } catch { return body.slice(0, 200); } })() : "";
+      throw new Error(`API ${path}: ${res.status}${detail ? ` – ${detail}` : ""}`);
+    }
     return res.json();
+  } catch (e: unknown) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(`Timeout ao chamar ${path} (${Math.round(timeoutMs / 1000)}s)`);
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -528,6 +537,79 @@ export const discoverH1Programs = () =>
   API_POST<{ new_programs_found: number; auto_imported: number; imported: any[] }>("/api/bounty/h1-discover", {});
 
 // ---------------------------------------------------------------------------
+// Bounty Program Search (bounty-targets-data)
+// ---------------------------------------------------------------------------
+
+export interface BountySearchParams {
+  q?: string;
+  platform?: string;
+  bounty_only?: boolean;
+  limit?: number;
+  asset_type?: string;
+  min_scope?: number;
+  has_wildcards?: boolean;
+  sort_by?: "newest" | "name" | "scope_size" | "bounty_changed";
+  scope_changed?: boolean;
+}
+
+export interface BountySearchProgram {
+  id: string;
+  name: string;
+  handle?: string;
+  platform: string;
+  url: string;
+  in_scope: string[];
+  out_of_scope: string[];
+  has_bounty: boolean;
+  bounty_min?: number | null;
+  bounty_max?: number | null;
+  asset_types: string[];
+  scope_count: number;
+  wildcard_count: number;
+  scope_preview: string[];
+  scope_changed?: boolean;
+  scope_change_detected?: string;
+  created_at?: string;
+  last_data_sync?: string;
+}
+
+export interface BountySearchResponse {
+  results: BountySearchProgram[];
+  total: number;
+  summary: {
+    platforms: Record<string, number>;
+    with_bounty: number;
+    with_wildcards: number;
+  };
+}
+
+export const searchBountyPrograms = (params: BountySearchParams = {}) => {
+  const sp = new URLSearchParams();
+  if (params.q) sp.set("q", params.q);
+  if (params.platform) sp.set("platform", params.platform);
+  if (params.bounty_only) sp.set("bounty_only", "true");
+  if (params.limit) sp.set("limit", String(params.limit));
+  if (params.asset_type) sp.set("asset_type", params.asset_type);
+  if (params.min_scope) sp.set("min_scope", String(params.min_scope));
+  if (params.has_wildcards) sp.set("has_wildcards", "true");
+  if (params.sort_by) sp.set("sort_by", params.sort_by);
+  if (params.scope_changed) sp.set("scope_changed", "true");
+  return apiFetch<BountySearchResponse>(`/api/bounty-data/search?${sp.toString()}`);
+};
+
+export const fetchBountyDataStats = () =>
+  apiFetch<{
+    last_fetch: string | null;
+    programs_fetched: number;
+    programs_imported: number;
+    programs_updated: number;
+    domains_total: number;
+    wildcards_total: number;
+    errors: number;
+    by_platform: Record<string, number>;
+  }>("/api/bounty-data/stats");
+
+// ---------------------------------------------------------------------------
 // Advanced Scanner Stats
 // ---------------------------------------------------------------------------
 
@@ -666,6 +748,20 @@ export interface AIStats {
 export const fetchAIStats = () =>
   apiFetch<AIStats>("/api/ai/stats");
 
+export interface AIHistoryEntry {
+  id: number;
+  type: string;
+  ts: string;
+  status: "success" | "error" | "partial";
+  input: string;
+  result: Record<string, unknown> | null;
+  duration_ms: number;
+  model: string;
+}
+
+export const fetchAIHistory = (limit = 50) =>
+  apiFetch<{ history: AIHistoryEntry[] }>(`/api/ai/history?limit=${limit}`);
+
 export const aiClassifyFinding = (finding: Record<string, unknown>) =>
   API_POST<{
     classification: "true_positive" | "false_positive";
@@ -721,3 +817,373 @@ export const fetchIntigrtiActivities = () =>
 
 export const importIntigrtiPrograms = () =>
   API_POST<{ imported: number; updated: number; total_programs: number }>("/api/intigriti/import", {});
+
+// ---------------------------------------------------------------------------
+// AI Recon Analysis
+// ---------------------------------------------------------------------------
+
+export interface AiReport {
+  executive_summary: string;
+  overall_risk: "critical" | "high" | "medium" | "low";
+  total_targets: number;
+  total_findings: number;
+  critical_assets: string[];
+  top_attack_strategies: string[];
+  severity_breakdown: Record<string, number>;
+  recommended_next_steps: string[];
+  generated_at: string;
+  targets_analyzed: number;
+}
+
+export interface PrioritizedTarget {
+  domain: string;
+  rank: number | null;
+  attack_angle: string;
+  reasoning: string;
+  risk_score: number;
+  finding_count: number;
+  chain_count: number;
+}
+
+export interface TargetAiAnalysis {
+  target_id: string;
+  domain: string;
+  ai_priority: {
+    rank: number;
+    attack_angle: string;
+    reasoning: string;
+    key_findings: string[];
+  } | null;
+  ai_vuln_chains: {
+    chain_name: string;
+    severity: string;
+    steps: string[];
+    impact: string;
+    findings_used: string[];
+  }[];
+  enriched_findings: {
+    code: string;
+    title: string;
+    severity: string;
+    ai_impact: string;
+    ai_guidance: string;
+  }[];
+  total_findings: number;
+  ai_findings_analyzed: boolean;
+}
+
+export const fetchProgramAiAnalysis = (programId: string) =>
+  apiFetch<{
+    program_id: string;
+    program_name: string;
+    ai_report: AiReport | null;
+    prioritized_targets: PrioritizedTarget[];
+    ai_ready: boolean;
+  }>(`/api/bounty/programs/${programId}/ai-analysis`);
+
+export const fetchRankedTargets = (programId: string, limit = 20) =>
+  apiFetch<any[]>(`/api/bounty/programs/${programId}/ranked-targets?limit=${limit}`);
+
+export const fetchTargetAiAnalysis = (targetId: string) =>
+  apiFetch<TargetAiAnalysis>(`/api/bounty/targets/${targetId}/ai-analysis`);
+
+export const triggerProgramAiAnalysis = (programId: string) =>
+  API_POST<{ status: string }>(`/api/bounty/programs/${programId}/ai-analyze`, {});
+
+// ---------------------------------------------------------------------------
+// Activity Logs (terminal live feed)
+// ---------------------------------------------------------------------------
+export interface ActivityLogEntry {
+  ts: string;
+  level: string;
+  msg: string;
+  tag: string;
+}
+
+export interface ActivityLogsResponse {
+  logs: ActivityLogEntry[];
+  total_buffered: number;
+}
+
+export const fetchActivityLogs = (limit = 80, after?: string) => {
+  let path = `/api/activity/logs?limit=${limit}`;
+  if (after) path += `&after=${encodeURIComponent(after)}`;
+  return apiFetch<ActivityLogsResponse>(path);
+};
+
+// ---------------------------------------------------------------------------
+// Platform Watcher (multi-platform scraping)
+// ---------------------------------------------------------------------------
+
+export interface WatcherPlatformInfo {
+  name: string;
+  configured: boolean;
+  enabled: boolean;
+}
+
+export interface WatcherStats {
+  last_check: string | null;
+  total_checks: number;
+  programs_found: Record<string, number>;
+  new_programs: number;
+  scope_changes: number;
+  errors: number;
+  running: boolean;
+}
+
+export interface WatcherStatusResponse {
+  stats: WatcherStats;
+  platforms: WatcherPlatformInfo[];
+  available_scrapers: string[];
+}
+
+export interface WatcherCheckResult {
+  status: string;
+  programs?: number;
+  new?: number;
+  scope_changed?: number;
+  removed?: number;
+  imported?: number;
+  updated?: number;
+  elapsed_seconds?: number;
+  error?: string;
+  reason?: string;
+}
+
+export interface WatcherCheckResponse {
+  results: Record<string, WatcherCheckResult>;
+}
+
+export const fetchWatcherStatus = () =>
+  apiFetch<WatcherStatusResponse>('/api/watcher/status');
+
+export const triggerWatcherCheck = (body?: {
+  platforms?: string[];
+  bounty_only?: boolean;
+  keywords?: string[];
+  min_bounty?: number;
+}) =>
+  API_POST<WatcherCheckResponse>('/api/watcher/check', body || {});
+
+export const triggerWatcherCheckSingle = (platform: string) =>
+  API_POST<WatcherCheckResponse>(`/api/watcher/check/${platform}`, {});
+
+export const fetchWatcherPrograms = (platform?: string) => {
+  const path = platform
+    ? `/api/watcher/programs/${platform}?limit=200`
+    : '/api/watcher/programs';
+  return apiFetch<{
+    platform?: string;
+    platforms?: Record<string, number>;
+    count?: number;
+    total?: number;
+    programs?: Array<Record<string, unknown>>;
+  }>(path);
+};
+
+// ═══════════════════════════════════════════════════════════════
+// BugHunt — dedicated endpoints
+// ═══════════════════════════════════════════════════════════════
+
+export interface BugHuntStatus {
+  configured: boolean;
+  email_set: boolean;
+  password_set: boolean;
+  capsolver_set: boolean;
+  programs_cached: number;
+  programs_found_total: number;
+  last_check: string | null;
+  last_error: string | null;
+  status: string;
+}
+
+export interface BugHuntTestResult {
+  ok: boolean;
+  error?: string;
+  message?: string;
+  programs_count?: number;
+}
+
+export interface BugHuntScrapeResult {
+  ok: boolean;
+  fetched: number;
+  new: number;
+  error?: string | null;
+  programs: BugHuntProgram[];
+}
+
+export interface BugHuntProgram {
+  name: string;
+  url: string;
+  platform: string;
+  program_id: string;
+  scope: string[];
+  reward_type: string;
+  max_bounty: number;
+  min_bounty?: number;
+}
+
+export const fetchBugHuntStatus = () =>
+  apiFetch<BugHuntStatus>('/api/bughunt/status');
+
+export const testBugHuntConnection = () =>
+  API_POST<BugHuntTestResult>('/api/bughunt/test', {});
+
+export const triggerBugHuntScrape = () =>
+  API_POST<BugHuntScrapeResult>('/api/bughunt/scrape', {});
+
+export const fetchBugHuntPrograms = (params?: { limit?: number; bounty_only?: boolean; search?: string }) => {
+  const q = new URLSearchParams();
+  if (params?.limit) q.set('limit', String(params.limit));
+  if (params?.bounty_only) q.set('bounty_only', 'true');
+  if (params?.search) q.set('search', params.search);
+  const qs = q.toString();
+  return apiFetch<{ count: number; programs: BugHuntProgram[] }>(`/api/bughunt/programs${qs ? `?${qs}` : ''}`);
+};
+
+// ── BugHunt AI Report Generator ─────────────────────────────
+
+export interface BugHuntScopeAnalysis {
+  ok: boolean;
+  error?: string;
+  analysis?: {
+    programa: string;
+    alvos_analisados: number;
+    superficie_ataque: string;
+    tipo_aplicacao: string;
+    tecnologias_provaveis: string[];
+    top_5_vulnerabilidades: Array<{ nome: string; severidade: string; justificativa: string }>;
+    vetores_especificos: string[];
+    subdominios_interessantes: Array<{ dominio?: string; motivo?: string } | string>;
+    dicas_recompensa: string[];
+    risco_geral: string;
+    estimativa_horas: number;
+  };
+}
+
+export interface BugHuntVulnSuggestions {
+  ok: boolean;
+  error?: string;
+  suggestions?: {
+    programa: string;
+    quick_wins: Array<{ vulnerabilidade: string; onde_testar: string; ferramenta: string; tempo_estimado: string }>;
+    bugs_comuns: Array<{ tipo: string; descricao: string; impacto: string; severidade: string }>;
+    cadeias_avancadas: Array<{ cadeia: string; passos: string[]; impacto_final: string; severidade_resultante: string }>;
+    checklist: string[];
+    ferramentas_recomendadas: Array<{ nome: string; uso: string }>;
+    estimativa_recompensa: { minima: number; media: number; maxima: number };
+    prioridade_ataque: Array<{ alvo: string; motivo: string }>;
+  };
+}
+
+export interface BugHuntReport {
+  ok: boolean;
+  error?: string;
+  report?: {
+    programa: string;
+    tipo_vulnerabilidade: string;
+    gerado_em: string;
+    titulo: string;
+    resumo_executivo: string;
+    severidade: string;
+    cvss_score?: number;
+    cvss_vector?: string;
+    passos_reproducao: string[];
+    poc: string;
+    impacto: string;
+    remediacao: string[];
+    referencias: string[];
+    cwe?: string;
+    owasp_category?: string;
+    fallback?: boolean;
+  };
+}
+
+export const bughuntAnalyzeScope = (programId: string) =>
+  API_POST<BugHuntScopeAnalysis>('/api/bughunt/ai/analyze-scope', { program_id: programId });
+
+export const bughuntSuggestVulns = (programId: string) =>
+  API_POST<BugHuntVulnSuggestions>('/api/bughunt/ai/suggest-vulns', { program_id: programId });
+
+export const bughuntGenerateReport = (programId: string, vulnType: string, details?: string) =>
+  API_POST<BugHuntReport>('/api/bughunt/ai/generate-report', { program_id: programId, vuln_type: vulnType, details: details || '' });
+
+// ---------------------------------------------------------------------------
+// H1 Auto-Submit Pipeline
+// ---------------------------------------------------------------------------
+
+export interface H1Stats {
+  total_submissions: number;
+  successful: number;
+  failed: number;
+  h1_credentials_configured: boolean;
+  auto_submit_enabled: boolean;
+  auto_submit_config?: {
+    enabled: boolean;
+    interval_seconds: number;
+    batch_size: number;
+    dry_run: boolean;
+  };
+}
+
+export interface H1AutoSubmitResult {
+  status: string;
+  reports_generated: number;
+  processed_vulns: number;
+  submitted: number;
+  duplicates: number;
+  errors: number;
+  skipped: number;
+  details: Array<{ report_id: string; status: string; reason?: string }>;
+}
+
+export interface H1QueueItem {
+  id: string;
+  ip: string;
+  title: string;
+  severity: string;
+  vulnerability_count: number;
+}
+
+export const fetchH1Stats = () =>
+  apiFetch<H1Stats>('/api/h1/stats');
+
+export const fetchH1Queue = () =>
+  apiFetch<{ count: number; reports: H1QueueItem[] }>('/api/h1/queue');
+
+export const triggerH1AutoSubmit = (opts?: { limit?: number; dry_run?: boolean }) =>
+  API_POST<H1AutoSubmitResult>('/api/h1/auto-submit-now', opts || {});
+
+export const triggerH1BatchSubmit = (opts?: { limit?: number; auto_only?: boolean; dry_run?: boolean }) =>
+  API_POST<H1AutoSubmitResult>('/api/h1/batch-submit', opts || {});
+
+// Local reports management
+export interface LocalReport {
+  id: string;
+  ip: string;
+  title: string;
+  severity: string;
+  vulnerability_count: number;
+  status: string;
+  auto_submit_eligible: boolean;
+  created_at: string | null;
+}
+
+export interface ReportStats {
+  total: number;
+  draft: number;
+  submitted: number;
+  by_severity: Record<string, number>;
+}
+
+export const fetchLocalReports = (limit = 100, status = "draft") =>
+  apiFetch<{ count: number; reports: LocalReport[] }>(`/api/reports?limit=${limit}&status=${status}`);
+
+export const fetchReportStats = () =>
+  apiFetch<ReportStats>('/api/reports/stats');
+
+export const generateReports = (opts?: { limit?: number; severity_threshold?: string }) =>
+  API_POST<{ status: string; processed_vulns: number; reports_generated: number; errors: number }>('/api/reports/generate', opts || {});
+
+export const fetchH1Me = () =>
+  apiFetch<{ ok: boolean; username: string; programs: number }>('/api/hackerone/me', 30000);

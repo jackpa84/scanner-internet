@@ -2,191 +2,633 @@
 
 import { useState, useCallback, useEffect } from "react";
 import {
-  fetchHackerOneReports,
-  fetchHackerOneEarnings,
-  fetchHackerOnePrograms,
-  type HackerOneListResponse,
-  type HackerOnePageParams,
+  fetchH1Stats,
+  fetchH1Queue,
+  fetchH1Me,
+  fetchLocalReports,
+  fetchReportStats,
+  fetchSubmittedReports,
+  fetchSubmittedReportsStats,
+  generateReports,
+  triggerH1AutoSubmit,
+  triggerH1BatchSubmit,
+  searchBountyPrograms,
+  type H1Stats,
+  type H1QueueItem,
+  type LocalReport,
+  type ReportStats,
+  type SubmittedReport,
+  type SubmittedReportsStats,
+  type BountySearchParams,
+  type BountySearchResponse,
 } from "@/lib/api";
 
-const PAGE_SIZE = 20;
-type TabId = "reports" | "earnings" | "programs";
+/* ═══════════════════════════════════════════════════
+   Toast alert system
+   ═══════════════════════════════════════════════════ */
+type Toast = { id: number; type: "ok" | "err" | "info" | "load"; text: string };
+let _tid = 0;
 
-const TABS: { id: TabId; label: string }[] = [
-  { id: "reports", label: "Reports" },
-  { id: "earnings", label: "Earnings" },
-  { id: "programs", label: "Programas" },
-];
-
-function extractCursor(link: string | undefined, kind: "after" | "before"): string | undefined {
-  if (!link) return undefined;
-  try {
-    const url = new URL(link.startsWith("http") ? link : `https://api.hackerone.com/${link}`);
-    return url.searchParams.get(kind === "after" ? "page[after]" : "page[before]") ?? undefined;
-  } catch { return undefined; }
+function useToasts() {
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const push = useCallback((type: Toast["type"], text: string) => {
+    const t: Toast = { id: ++_tid, type, text };
+    setToasts(prev => [t, ...prev].slice(0, 8));
+    if (type !== "load") setTimeout(() => setToasts(prev => prev.filter(x => x.id !== t.id)), 6000);
+    return t.id;
+  }, []);
+  const remove = useCallback((id: number) => setToasts(prev => prev.filter(x => x.id !== id)), []);
+  return { toasts, push, remove };
 }
 
+/* ═══════════════════════════════════════════════════
+   Severity badge
+   ═══════════════════════════════════════════════════ */
+function Sev({ s }: { s: string }) {
+  const c: Record<string, string> = {
+    critical: "bg-rose-500/25 text-rose-300 border-rose-500/40 shadow-rose-500/10",
+    high: "bg-orange-500/25 text-orange-300 border-orange-500/40 shadow-orange-500/10",
+    medium: "bg-amber-500/20 text-amber-300 border-amber-500/30",
+    low: "bg-sky-500/20 text-sky-300 border-sky-500/30",
+    info: "bg-slate-500/20 text-slate-400 border-slate-500/30",
+  };
+  return <span className={`px-1.5 py-px rounded text-[9px] font-black uppercase tracking-wide border shadow-sm ${c[s] ?? c.info}`}>{s}</span>;
+}
+
+/* ═══════════════════════════════════════════════════
+   PAGE
+   ═══════════════════════════════════════════════════ */
 export default function HackerOnePage() {
-  const [tab, setTab] = useState<TabId>("reports");
-  const [data, setData] = useState<Record<TabId, HackerOneListResponse | null>>({ reports: null, earnings: null, programs: null });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /* ─── state ─── */
+  const [h1Stats, setH1Stats] = useState<H1Stats | null>(null);
+  const [h1Queue, setH1Queue] = useState<H1QueueItem[]>([]);
+  const [h1Me, setH1Me] = useState<{ ok: boolean; username: string; programs: number } | null>(null);
+  const [h1MeError, setH1MeError] = useState<string | null>(null);
+  const [reportStats, setReportStats] = useState<ReportStats | null>(null);
+  const [localReports, setLocalReports] = useState<LocalReport[]>([]);
+  const [submittedReports, setSubmittedReports] = useState<SubmittedReport[]>([]);
+  const [submittedStats, setSubmittedStats] = useState<SubmittedReportsStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState(false);
 
-  const fetchers: Record<TabId, (p: HackerOnePageParams) => Promise<HackerOneListResponse>> = {
-    reports: fetchHackerOneReports,
-    earnings: fetchHackerOneEarnings,
-    programs: fetchHackerOnePrograms,
-  };
+  // Discover
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchPlatform, setSearchPlatform] = useState("");
+  const [searchBountyOnly, setSearchBountyOnly] = useState(false);
+  const [searchHasWildcards, setSearchHasWildcards] = useState(false);
+  const [searchSortBy, setSearchSortBy] = useState<"newest" | "name" | "scope_size">("scope_size");
+  const [searchResults, setSearchResults] = useState<BountySearchResponse | null>(null);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [expandedProgram, setExpandedProgram] = useState<string | null>(null);
+  const [showDiscover, setShowDiscover] = useState(false);
 
-  const loadTab = useCallback(async (t: TabId, params: HackerOnePageParams = { page_size: PAGE_SIZE }) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetchers[t](params);
-      setData(prev => ({ ...prev, [t]: res }));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Erro ao carregar");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { toasts, push, remove } = useToasts();
 
+  /* ─── initial fetch with toast alerts ─── */
   useEffect(() => {
-    loadTab(tab);
-  }, [tab, loadTab]);
+    (async () => {
+      setLoading(true);
+      const lid = push("load", "Conectando aos serviços...");
 
-  const currentData = data[tab];
-  const items = (currentData?.data ?? []) as Array<{ id: string; type: string; attributes?: Record<string, unknown>; relationships?: Record<string, unknown> }>;
-  const hasNext = Boolean(currentData?.links?.next);
-  const hasPrev = Boolean(currentData?.links?.prev);
+      const results = await Promise.allSettled([
+        fetchH1Stats(),
+        fetchH1Queue(),
+        fetchReportStats(),
+        fetchLocalReports(100, "draft"),
+        fetchSubmittedReports(50),
+        fetchSubmittedReportsStats(),
+        fetchH1Me(),
+      ]);
+      remove(lid);
 
-  const navigate = (direction: "next" | "prev") => {
-    const link = direction === "next" ? currentData?.links?.next : currentData?.links?.prev;
-    const cursor = extractCursor(link, direction === "next" ? "after" : "before");
-    if (cursor) {
-      const params: HackerOnePageParams = { page_size: PAGE_SIZE };
-      if (direction === "next") params.page_after = cursor;
-      else params.page_before = cursor;
-      loadTab(tab, params);
+      const labels = ["H1 Stats", "Fila H1", "Report Stats", "Drafts Locais", "Enviados", "Stats Envio", "API H1 /me"];
+      let okCount = 0;
+      let errCount = 0;
+      results.forEach((r, i) => {
+        if (r.status === "fulfilled") { okCount++; }
+        else { errCount++; push("err", `${labels[i]}: ${r.reason instanceof Error ? r.reason.message : "falhou"}`); }
+      });
+
+      if (results[0].status === "fulfilled") setH1Stats(results[0].value);
+      if (results[1].status === "fulfilled") setH1Queue(results[1].value.reports || []);
+      if (results[2].status === "fulfilled") setReportStats(results[2].value);
+      if (results[3].status === "fulfilled") setLocalReports(results[3].value.reports || []);
+      if (results[4].status === "fulfilled") setSubmittedReports(results[4].value);
+      if (results[5].status === "fulfilled") setSubmittedStats(results[5].value);
+      if (results[6].status === "fulfilled") {
+        setH1Me(results[6].value);
+      } else {
+        const err = results[6].reason;
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.includes("abort") || msg.includes("AbortError")) setH1MeError("Timeout API H1");
+        else if (msg.includes("503") || msg.includes("not configured")) setH1MeError("Credenciais não configuradas");
+        else if (msg.includes("502")) setH1MeError("Token inválido/expirado");
+        else setH1MeError(msg);
+      }
+
+      if (okCount > 0) push("ok", `${okCount} serviço${okCount > 1 ? "s" : ""} carregado${okCount > 1 ? "s" : ""}${errCount ? ` · ${errCount} falha${errCount > 1 ? "s" : ""}` : ""}`);
+      setLoading(false);
+    })();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /* ─── refresh ─── */
+  const refreshAll = async () => {
+    setLoading(true);
+    const lid = push("load", "Atualizando dados...");
+    try {
+      const [stats, queue, rStats, reports, submitted, sStats] = await Promise.all([
+        fetchH1Stats(), fetchH1Queue(), fetchReportStats(),
+        fetchLocalReports(100, "draft"), fetchSubmittedReports(50), fetchSubmittedReportsStats(),
+      ]);
+      setH1Stats(stats); setH1Queue(queue.reports || []);
+      setReportStats(rStats); setLocalReports(reports.reports || []);
+      setSubmittedReports(submitted); setSubmittedStats(sStats);
+      remove(lid);
+      push("ok", "Dados atualizados");
+    } catch {
+      remove(lid);
+      push("err", "Falha ao atualizar");
     }
+    setLoading(false);
   };
 
+  /* ─── search ─── */
+  const doSearch = useCallback(async (overrides?: Partial<BountySearchParams>) => {
+    setSearchLoading(true);
+    const lid = push("load", "Buscando programas...");
+    try {
+      const res = await searchBountyPrograms({
+        q: overrides?.q ?? searchQuery,
+        platform: overrides?.platform ?? searchPlatform,
+        bounty_only: overrides?.bounty_only ?? searchBountyOnly,
+        has_wildcards: overrides?.has_wildcards ?? searchHasWildcards,
+        sort_by: overrides?.sort_by ?? searchSortBy,
+        limit: 60,
+      });
+      setSearchResults(res);
+      remove(lid);
+      push("ok", `${res.total} programa${res.total !== 1 ? "s" : ""} encontrado${res.total !== 1 ? "s" : ""}`);
+    } catch (e) {
+      remove(lid);
+      push("err", e instanceof Error ? e.message : "Erro na busca");
+    } finally { setSearchLoading(false); }
+  }, [searchQuery, searchPlatform, searchBountyOnly, searchHasWildcards, searchSortBy, push, remove]);
+
+  /* ─── actions ─── */
+  const handleAction = async (
+    label: string,
+    fn: () => Promise<string>,
+  ) => {
+    setActionLoading(true);
+    const lid = push("load", `${label}...`);
+    try {
+      const msg = await fn();
+      remove(lid);
+      push("ok", msg);
+      await refreshAll();
+    } catch (e: unknown) {
+      remove(lid);
+      push("err", `${label}: ${e instanceof Error ? e.message : "falhou"}`);
+    } finally { setActionLoading(false); }
+  };
+
+  const doGenerate = () => handleAction("Gerando reports", async () => {
+    const r = await generateReports({ limit: 50 });
+    return `${r.reports_generated} reports de ${r.processed_vulns} vulns`;
+  });
+  const doDryRun = () => handleAction("Dry run", async () => {
+    const r = await triggerH1BatchSubmit({ limit: 10, dry_run: true });
+    return `${r.submitted} seriam enviados · ${r.duplicates} duplicados`;
+  });
+  const doBatchSubmit = () => handleAction("Batch submit", async () => {
+    const r = await triggerH1BatchSubmit({ limit: 10, dry_run: false });
+    return `${r.submitted} enviados · ${r.duplicates} dup · ${r.errors} erro(s)`;
+  });
+  const doFullCycle = () => handleAction("Ciclo completo", async () => {
+    const r = await triggerH1AutoSubmit({ limit: 10 });
+    return `${r.reports_generated} reports → ${r.submitted} enviados · ${r.duplicates} dup`;
+  });
+
+  /* ─── derived ─── */
+  const credOk = h1Me != null;
+  const credInvalid = !credOk && h1MeError != null && (h1MeError.includes("inválido") || h1MeError.includes("expirado"));
+  const autoOn = h1Stats?.auto_submit_config?.enabled ?? false;
+  const dryMode = h1Stats?.auto_submit_config?.dry_run ?? false;
+
+  /* ═══════════════════════════════════════════════════
+     RENDER
+     ═══════════════════════════════════════════════════ */
   return (
-    <div className="space-y-6 max-w-4xl">
-      <div>
-        <h1 className="text-xl font-bold text-[var(--foreground)]">HackerOne</h1>
-        <p className="text-sm text-[var(--muted)] mt-1">Reports, earnings e programas da sua conta.</p>
-      </div>
+    <div className="min-h-screen" style={{ background: "linear-gradient(180deg, #05050c 0%, #08081a 50%, #060614 100%)" }}>
+      <div className="max-w-6xl mx-auto px-4 py-6 space-y-5">
 
-      {/* Tabs */}
-      <div className="flex gap-1 rounded-xl border border-[var(--border)] bg-[var(--card)] p-1 w-fit">
-        {TABS.map(t => (
-          <button key={t.id} onClick={() => setTab(t.id)}
-            className={`rounded-lg px-4 py-2 text-sm font-medium transition-all ${
-              tab === t.id
-                ? "bg-[var(--accent)]/15 text-[var(--accent-light)] shadow-sm"
-                : "text-[var(--muted)] hover:text-[var(--foreground)]"
-            }`}>
-            {t.label}
-          </button>
-        ))}
-      </div>
+        {/* ─── TOAST ALERTS ─── */}
+        {toasts.length > 0 && (
+          <div className="fixed top-4 right-4 z-50 space-y-2 w-80 pointer-events-none">
+            {toasts.map(t => (
+              <div
+                key={t.id}
+                onClick={() => remove(t.id)}
+                className={`pointer-events-auto cursor-pointer px-4 py-2.5 rounded-lg border text-xs font-medium backdrop-blur-xl shadow-2xl transition-all animate-[slideIn_0.3s_ease-out] ${
+                  t.type === "ok"   ? "bg-emerald-950/80 border-emerald-500/30 text-emerald-300 shadow-emerald-500/10" :
+                  t.type === "err"  ? "bg-rose-950/80 border-rose-500/30 text-rose-300 shadow-rose-500/10" :
+                  t.type === "load" ? "bg-cyan-950/80 border-cyan-500/30 text-cyan-300 shadow-cyan-500/10" :
+                                      "bg-slate-950/80 border-slate-500/30 text-slate-300"
+                }`}
+              >
+                <span className="mr-2">
+                  {t.type === "ok" ? "✓" : t.type === "err" ? "✕" : t.type === "load" ? "◌" : "i"}
+                </span>
+                {t.text}
+              </div>
+            ))}
+          </div>
+        )}
 
-      {error && (
-        <div className="rounded-xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">{error}</div>
-      )}
-
-      {loading && (
-        <div className="py-8 text-center text-sm text-[var(--muted)]">Carregando...</div>
-      )}
-
-      {!loading && currentData && items.length === 0 && (
-        <div className="rounded-2xl border border-dashed border-[var(--border)] bg-[var(--card)]/50 py-8 text-center text-sm text-[var(--muted)]">
-          Nenhum item encontrado.
-        </div>
-      )}
-
-      {!loading && items.length > 0 && (
-        <div className="rounded-2xl border border-[var(--border)] bg-[var(--card)]/60 overflow-hidden">
-          <ul className="divide-y divide-[var(--border)]">
-            {tab === "reports" && items.map(item => {
-              const a = (item.attributes ?? {}) as Record<string, unknown>;
-              const title = String(a.title ?? "(sem titulo)");
-              const state = a.state ? String(a.state) : "";
-              const createdAt = a.created_at ? String(a.created_at) : "";
-              const url = a.url ? String(a.url) : "";
-              return (
-                <li key={item.id} className="px-5 py-3.5 hover:bg-[var(--card-hover)] transition-all">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-[var(--foreground)] text-sm truncate">{title}</div>
-                      <div className="flex gap-2 mt-1 text-xs text-[var(--muted)]">
-                        {state && <span className="rounded-md bg-[var(--background)] border border-[var(--border)] px-2 py-0.5">{state}</span>}
-                        {createdAt && <span>{new Date(createdAt).toLocaleDateString("pt-BR")}</span>}
-                      </div>
-                    </div>
-                    {url && <a href={url} target="_blank" rel="noopener noreferrer" className="text-xs text-[var(--accent-light)] hover:underline shrink-0">Abrir</a>}
-                  </div>
-                </li>
-              );
-            })}
-
-            {tab === "earnings" && items.map(item => {
-              const a = (item.attributes ?? {}) as Record<string, unknown>;
-              const rels = (item.relationships ?? {}) as Record<string, { data?: { attributes?: { name?: string } } }>;
-              const amount = typeof a.amount === "number" ? a.amount : null;
-              const teamName = rels.team?.data?.attributes?.name ?? "";
-              const createdAt = a.created_at ? String(a.created_at) : "";
-              return (
-                <li key={item.id} className="px-5 py-3.5 hover:bg-[var(--card-hover)] transition-all">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-bold text-emerald-400 text-sm">
-                        {amount != null ? `$${amount.toLocaleString("en-US", { minimumFractionDigits: 2 })}` : "-"}
-                      </div>
-                      <div className="text-xs text-[var(--muted)] mt-0.5">
-                        {teamName}
-                        {createdAt && <span className="ml-2">{new Date(createdAt).toLocaleDateString("pt-BR")}</span>}
-                      </div>
-                    </div>
-                  </div>
-                </li>
-              );
-            })}
-
-            {tab === "programs" && items.map(item => {
-              const a = (item.attributes ?? {}) as Record<string, unknown>;
-              const name = String(a.name || a.handle || item.id);
-              const handle = a.handle ? String(a.handle) : "";
-              const url = a.url ? String(a.url) : "";
-              return (
-                <li key={item.id} className="px-5 py-3.5 hover:bg-[var(--card-hover)] transition-all">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <div className="font-medium text-[var(--foreground)] text-sm">{name}</div>
-                      {handle && <div className="text-xs text-[var(--muted)] mt-0.5">@{handle}</div>}
-                    </div>
-                    {url && <a href={url} target="_blank" rel="noopener noreferrer" className="text-xs text-[var(--accent-light)] hover:underline shrink-0">Abrir</a>}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-
-          {/* Pagination */}
-          <div className="flex items-center justify-between border-t border-[var(--border)] px-5 py-3 bg-[var(--background)]/30">
-            <button onClick={() => navigate("prev")} disabled={!hasPrev || loading}
-              className="rounded-lg px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card)] disabled:opacity-30 disabled:pointer-events-none transition-all">
-              Anteriores
-            </button>
-            <span className="text-xs text-[var(--muted)] tabular-nums">{items.length} itens</span>
-            <button onClick={() => navigate("next")} disabled={!hasNext || loading}
-              className="rounded-lg px-3 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-[var(--card)] disabled:opacity-30 disabled:pointer-events-none transition-all">
-              Proximos
+        {/* ─── HEADER ─── */}
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-600/30 to-cyan-600/30 border border-violet-500/20 flex items-center justify-center text-lg shadow-lg shadow-violet-500/10">
+              🏴‍☠️
+            </div>
+            <div>
+              <h1 className="text-lg font-bold text-white tracking-tight">HackerOne</h1>
+              <div className="flex items-center gap-2 mt-0.5">
+                <span className={`w-2 h-2 rounded-full ${credOk ? "bg-emerald-400 animate-pulse shadow-lg shadow-emerald-400/50" : credInvalid ? "bg-rose-400" : "bg-amber-400"}`} />
+                <span className="text-[10px] text-slate-500">
+                  {credOk ? `${h1Me!.username} · ${h1Me!.programs} prog` : credInvalid ? "token expirado" : h1MeError ?? "desconectado"}
+                </span>
+                <span className={`text-[9px] px-1.5 py-px rounded font-black tracking-wider ${
+                  autoOn ? dryMode ? "bg-amber-500/15 text-amber-400 border border-amber-500/20" : "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
+                         : "bg-slate-500/10 text-slate-600 border border-slate-500/10"
+                }`}>{autoOn ? dryMode ? "DRY" : "AUTO" : "OFF"}</span>
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setShowDiscover(!showDiscover); if (!showDiscover && !searchResults) doSearch(); }}
+              className={`px-3 py-1.5 text-[10px] font-bold rounded-lg border transition-all ${
+                showDiscover ? "bg-cyan-500/15 border-cyan-500/30 text-cyan-300 shadow-lg shadow-cyan-500/10" : "bg-white/[0.02] border-white/8 text-slate-500 hover:text-white hover:border-white/15"
+              }`}
+            >🔍 Descobrir</button>
+            <button onClick={refreshAll} disabled={loading}
+              className="px-3 py-1.5 text-[10px] font-bold rounded-lg bg-white/[0.02] border border-white/8 text-slate-500 hover:text-white hover:border-white/15 transition-all disabled:opacity-30">
+              {loading ? "◌" : "↻"} Sync
             </button>
           </div>
         </div>
-      )}
+
+        {/* ─── CREDENTIAL ALERT ─── */}
+        {!credOk && (
+          <div className={`flex items-center gap-3 px-4 py-2.5 rounded-lg border ${
+            credInvalid ? "bg-rose-950/40 border-rose-500/20" : "bg-amber-950/30 border-amber-500/15"
+          }`}>
+            <span className="text-sm">{credInvalid ? "🔑" : "⚠"}</span>
+            <div className="flex-1 text-xs">
+              <span className={credInvalid ? "text-rose-300" : "text-amber-300"}>
+                {credInvalid ? "Token expirado" : "Credenciais H1 ausentes"}
+              </span>
+              <span className="text-slate-600 ml-2">
+                → <a href="https://hackerone.com/settings/api_token" target="_blank" rel="noopener noreferrer" className={`underline ${credInvalid ? "text-rose-400/70" : "text-amber-400/70"}`}>hackerone.com/settings/api_token</a> → atualizar .env
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ─── STATS ROW ─── */}
+        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+          {([
+            { v: reportStats?.total ?? 0, l: "Vulns", c: "from-cyan-500/20 to-cyan-500/5", tc: "text-cyan-400", bc: "border-cyan-500/15" },
+            { v: reportStats?.draft ?? 0, l: "Drafts", c: "from-violet-500/20 to-violet-500/5", tc: "text-violet-400", bc: "border-violet-500/15" },
+            { v: h1Queue.length, l: "Na Fila", c: "from-amber-500/20 to-amber-500/5", tc: "text-amber-400", bc: "border-amber-500/15" },
+            { v: h1Stats?.successful ?? 0, l: "Enviados", c: "from-emerald-500/20 to-emerald-500/5", tc: "text-emerald-400", bc: "border-emerald-500/15" },
+            { v: h1Stats?.failed ?? 0, l: "Falhas", c: "from-rose-500/20 to-rose-500/5", tc: "text-rose-400", bc: "border-rose-500/15" },
+            { v: h1Stats?.total_submissions ?? 0, l: "Total", c: "from-slate-500/15 to-slate-500/5", tc: "text-slate-300", bc: "border-slate-500/10" },
+          ] as const).map((s, i) => (
+            <div key={i} className={`rounded-lg border ${s.bc} bg-gradient-to-b ${s.c} p-3 text-center`}>
+              <div className={`text-2xl font-black tabular-nums ${s.tc}`}>{s.v}</div>
+              <div className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5">{s.l}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* ─── ACTION BAR ─── */}
+        <div className="flex gap-2 flex-wrap">
+          <button onClick={doGenerate} disabled={actionLoading}
+            className="flex-1 min-w-[140px] px-4 py-2.5 text-[11px] font-bold rounded-lg bg-gradient-to-b from-cyan-500/10 to-cyan-500/[0.03] border border-cyan-500/20 text-cyan-300 hover:from-cyan-500/20 hover:to-cyan-500/10 transition-all disabled:opacity-30 shadow-lg shadow-cyan-500/5">
+            {actionLoading ? "◌" : "⚡"} Gerar Reports
+          </button>
+          <button onClick={doDryRun} disabled={actionLoading}
+            className="flex-1 min-w-[120px] px-4 py-2.5 text-[11px] font-bold rounded-lg bg-gradient-to-b from-amber-500/10 to-amber-500/[0.03] border border-amber-500/20 text-amber-300 hover:from-amber-500/20 hover:to-amber-500/10 transition-all disabled:opacity-30 shadow-lg shadow-amber-500/5">
+            {actionLoading ? "◌" : "👁"} Dry Run
+          </button>
+          <button onClick={doBatchSubmit} disabled={actionLoading || !credOk}
+            className="flex-1 min-w-[120px] px-4 py-2.5 text-[11px] font-bold rounded-lg bg-gradient-to-b from-emerald-500/10 to-emerald-500/[0.03] border border-emerald-500/20 text-emerald-300 hover:from-emerald-500/20 hover:to-emerald-500/10 transition-all disabled:opacity-30 shadow-lg shadow-emerald-500/5">
+            {actionLoading ? "◌" : "📤"} Enviar Batch
+          </button>
+          <button onClick={doFullCycle} disabled={actionLoading}
+            className="flex-1 min-w-[140px] px-4 py-2.5 text-[11px] font-bold rounded-lg bg-gradient-to-b from-violet-500/15 to-violet-500/[0.03] border border-violet-500/25 text-violet-300 hover:from-violet-500/25 hover:to-violet-500/10 transition-all disabled:opacity-30 shadow-lg shadow-violet-500/5">
+            {actionLoading ? "◌" : "▶"} Ciclo Completo
+          </button>
+        </div>
+
+        {/* ─── LOADING ─── */}
+        {loading && (
+          <div className="flex items-center justify-center gap-3 py-8">
+            <div className="w-5 h-5 border-2 border-violet-500/30 border-t-violet-400 rounded-full animate-spin" />
+            <span className="text-xs text-slate-500">Carregando...</span>
+          </div>
+        )}
+
+        {/* ─── QUEUE + SUBMITTED ─── */}
+        {!loading && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+            {/* QUEUE */}
+            <div className="rounded-xl border border-amber-500/10 bg-gradient-to-b from-amber-500/[0.03] to-transparent overflow-hidden">
+              <div className="px-4 py-3 border-b border-amber-500/10 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shadow-sm shadow-amber-400/50" />
+                  <span className="text-[11px] font-bold text-amber-300 uppercase tracking-wider">Fila de Envio</span>
+                  <span className="text-[10px] bg-amber-500/15 text-amber-400 px-1.5 rounded font-bold">{h1Queue.length}</span>
+                </div>
+              </div>
+              {h1Queue.length === 0 && localReports.length === 0 ? (
+                <div className="px-4 py-8 text-center">
+                  <div className="text-slate-600 text-xs">Nenhum report na fila</div>
+                </div>
+              ) : (
+                <div className="divide-y divide-white/[0.03] max-h-[380px] overflow-y-auto">
+                  {h1Queue.map(r => (
+                    <div key={r.id} className="px-4 py-2.5 hover:bg-white/[0.02] transition-colors">
+                      <div className="flex items-center gap-2.5">
+                        <Sev s={r.severity} />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-white/90 font-medium truncate">{r.title}</div>
+                          <div className="text-[10px] text-slate-600 font-mono mt-px">{r.ip} · {r.vulnerability_count} vuln{r.vulnerability_count !== 1 ? "s" : ""}</div>
+                        </div>
+                        <span className="text-[9px] text-amber-500/50 font-mono">#{r.id.slice(-6)}</span>
+                      </div>
+                    </div>
+                  ))}
+                  {localReports.filter(r => !h1Queue.find(q => q.id === r.id)).slice(0, 20).map(r => (
+                    <div key={r.id} className="px-4 py-2.5 hover:bg-white/[0.02] transition-colors opacity-60">
+                      <div className="flex items-center gap-2.5">
+                        <Sev s={r.severity} />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-white/70 font-medium truncate">{r.title}</div>
+                          <div className="text-[10px] text-slate-600 font-mono mt-px">
+                            {r.ip} · {r.vulnerability_count}v
+                            {r.auto_submit_eligible && <span className="text-emerald-500 ml-1">✓ elegível</span>}
+                          </div>
+                        </div>
+                        <span className={`text-[9px] px-1.5 py-px rounded font-bold ${
+                          r.status === "draft" ? "bg-violet-500/15 text-violet-400" : r.status === "submitted" ? "bg-emerald-500/15 text-emerald-400" : "bg-rose-500/15 text-rose-400"
+                        }`}>{r.status}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* SUBMITTED */}
+            <div className="rounded-xl border border-emerald-500/10 bg-gradient-to-b from-emerald-500/[0.03] to-transparent overflow-hidden">
+              <div className="px-4 py-3 border-b border-emerald-500/10 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/50" />
+                  <span className="text-[11px] font-bold text-emerald-300 uppercase tracking-wider">Enviados</span>
+                  <span className="text-[10px] bg-emerald-500/15 text-emerald-400 px-1.5 rounded font-bold">{submittedReports.length}</span>
+                </div>
+                {submittedStats && (
+                  <div className="flex gap-1.5 text-[9px]">
+                    {submittedStats.submitted > 0 && <span className="bg-emerald-500/10 text-emerald-400 px-1.5 py-px rounded font-bold">✓ {submittedStats.submitted}</span>}
+                    {submittedStats.pending > 0 && <span className="bg-amber-500/10 text-amber-400 px-1.5 py-px rounded font-bold">◌ {submittedStats.pending}</span>}
+                    {submittedStats.errors > 0 && <span className="bg-rose-500/10 text-rose-400 px-1.5 py-px rounded font-bold">✕ {submittedStats.errors}</span>}
+                  </div>
+                )}
+              </div>
+              {submittedReports.length === 0 ? (
+                <div className="px-4 py-8 text-center">
+                  <div className="text-slate-600 text-xs">Nenhum report enviado ainda</div>
+                </div>
+              ) : (
+                <div className="divide-y divide-white/[0.03] max-h-[380px] overflow-y-auto">
+                  {submittedReports.map(r => (
+                    <div key={r.id} className="px-4 py-2.5 hover:bg-white/[0.02] transition-colors">
+                      <div className="flex items-center gap-2.5">
+                        <Sev s={r.severity} />
+                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                          r.status === "submitted" ? "bg-emerald-400" : r.status === "pending" ? "bg-amber-400 animate-pulse" : "bg-rose-400"
+                        }`} />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-xs text-white/90 font-medium truncate">{r.title}</div>
+                          <div className="text-[10px] text-slate-600 mt-px flex items-center gap-1.5 flex-wrap">
+                            <span className="font-mono">{r.domain}</span>
+                            {r.program_name && <><span className="text-slate-700">·</span><span>{r.program_name}</span></>}
+                            {r.findings_count > 0 && <><span className="text-slate-700">·</span><span>{r.findings_count}f</span></>}
+                            {r.timestamp && <><span className="text-slate-700">·</span><span>{new Date(r.timestamp).toLocaleDateString("pt-BR")}</span></>}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                          <span className={`text-[9px] px-1.5 py-px rounded font-bold ${
+                            r.status === "submitted" ? "bg-emerald-500/15 text-emerald-400" : r.status === "pending" ? "bg-amber-500/15 text-amber-400" : "bg-rose-500/15 text-rose-400"
+                          }`}>{r.status}</span>
+                          {r.h1_report_url && (
+                            <a href={r.h1_report_url} target="_blank" rel="noopener noreferrer"
+                              className="text-[10px] text-violet-400 hover:text-violet-300">↗</a>
+                          )}
+                        </div>
+                      </div>
+                      {r.error && (
+                        <div className="mt-1.5 text-[9px] text-rose-400/70 bg-rose-500/5 border border-rose-500/10 rounded px-2 py-1">
+                          {r.error}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ─── SEVERITY BREAKDOWN ─── */}
+        {!loading && submittedStats && Object.keys(submittedStats.by_severity).length > 0 && (
+          <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg border border-white/[0.04] bg-white/[0.01]">
+            <span className="text-[9px] text-slate-600 font-bold uppercase tracking-widest">Severidades</span>
+            <div className="flex gap-2 flex-wrap">
+              {Object.entries(submittedStats.by_severity)
+                .sort((a, b) => { const o: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 }; return (o[a[0]] ?? 9) - (o[b[0]] ?? 9); })
+                .map(([sev, count]) => (
+                  <div key={sev} className="flex items-center gap-1">
+                    <Sev s={sev} />
+                    <span className="text-xs font-black text-white/80 tabular-nums">{count}</span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {/* ═════════════════════════════════════════
+           DISCOVER PANEL
+           ═════════════════════════════════════════ */}
+        {showDiscover && (
+          <div className="rounded-xl border border-cyan-500/15 bg-gradient-to-b from-cyan-500/[0.04] to-transparent overflow-hidden">
+            <div className="px-4 py-3 border-b border-cyan-500/10 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shadow-sm shadow-cyan-400/50" />
+                <span className="text-[11px] font-bold text-cyan-300 uppercase tracking-wider">Descobrir Programas</span>
+                {searchResults && <span className="text-[10px] bg-cyan-500/15 text-cyan-400 px-1.5 rounded font-bold">{searchResults.total}</span>}
+              </div>
+              {searchResults && (
+                <div className="flex gap-1.5 text-[9px]">
+                  {searchResults.summary.with_bounty > 0 && <span className="bg-emerald-500/10 text-emerald-400 px-1.5 py-px rounded font-bold">💰 {searchResults.summary.with_bounty}</span>}
+                  {searchResults.summary.with_wildcards > 0 && <span className="bg-cyan-500/10 text-cyan-400 px-1.5 py-px rounded font-bold">🌐 {searchResults.summary.with_wildcards}</span>}
+                </div>
+              )}
+            </div>
+
+            {/* Search controls */}
+            <div className="px-4 py-3 border-b border-cyan-500/[0.06] space-y-2">
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && doSearch()}
+                  placeholder="Nome, domínio, handle..."
+                  className="flex-1 px-3 py-2 text-xs rounded-lg bg-black/60 border border-white/8 text-white placeholder:text-slate-600 focus:outline-none focus:border-cyan-500/30 focus:shadow-lg focus:shadow-cyan-500/5 transition-all"
+                />
+                <button onClick={() => doSearch()} disabled={searchLoading}
+                  className="px-4 py-2 text-[10px] font-bold rounded-lg bg-cyan-500/15 border border-cyan-500/25 text-cyan-300 hover:bg-cyan-500/25 transition-all disabled:opacity-30 shadow-lg shadow-cyan-500/5">
+                  {searchLoading ? "◌" : "→"}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <select value={searchPlatform} onChange={e => setSearchPlatform(e.target.value)}
+                  className="px-2 py-1 text-[10px] rounded bg-black/50 border border-white/8 text-slate-300 focus:outline-none">
+                  <option value="">Plataforma</option>
+                  <option value="hackerone">HackerOne</option>
+                  <option value="bugcrowd">Bugcrowd</option>
+                  <option value="intigriti">Intigriti</option>
+                  <option value="yeswehack">YWH</option>
+                </select>
+                <select value={searchSortBy} onChange={e => setSearchSortBy(e.target.value as "newest" | "name" | "scope_size")}
+                  className="px-2 py-1 text-[10px] rounded bg-black/50 border border-white/8 text-slate-300 focus:outline-none">
+                  <option value="scope_size">Maior scope</option>
+                  <option value="newest">Recentes</option>
+                  <option value="name">A-Z</option>
+                </select>
+                <button onClick={() => setSearchBountyOnly(!searchBountyOnly)}
+                  className={`px-2 py-1 text-[10px] rounded border font-bold transition-all ${
+                    searchBountyOnly ? "bg-emerald-500/15 border-emerald-500/25 text-emerald-300" : "bg-black/30 border-white/8 text-slate-500 hover:text-white"
+                  }`}>💰 Bounty</button>
+                <button onClick={() => setSearchHasWildcards(!searchHasWildcards)}
+                  className={`px-2 py-1 text-[10px] rounded border font-bold transition-all ${
+                    searchHasWildcards ? "bg-cyan-500/15 border-cyan-500/25 text-cyan-300" : "bg-black/30 border-white/8 text-slate-500 hover:text-white"
+                  }`}>🌐 Wildcard</button>
+                {(searchQuery || searchPlatform || searchBountyOnly || searchHasWildcards) && (
+                  <button onClick={() => { setSearchQuery(""); setSearchPlatform(""); setSearchBountyOnly(false); setSearchHasWildcards(false); doSearch({ q: "", platform: "", bounty_only: false, has_wildcards: false }); }}
+                    className="px-2 py-1 text-[10px] rounded bg-rose-500/10 border border-rose-500/15 text-rose-400 hover:bg-rose-500/20 transition-all font-bold">
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Results */}
+            {searchLoading ? (
+              <div className="py-8 text-center">
+                <div className="w-5 h-5 border-2 border-cyan-500/30 border-t-cyan-400 rounded-full animate-spin mx-auto mb-2" />
+                <div className="text-[10px] text-slate-600">Buscando...</div>
+              </div>
+            ) : searchResults && searchResults.results.length === 0 ? (
+              <div className="py-8 text-center text-xs text-slate-600">Nenhum programa encontrado</div>
+            ) : searchResults ? (
+              <div className="divide-y divide-white/[0.03] max-h-[500px] overflow-y-auto">
+                {searchResults.results.map(prog => {
+                  const open = expandedProgram === prog.id;
+                  const pc: Record<string, string> = {
+                    hackerone: "text-violet-400", bugcrowd: "text-orange-400",
+                    intigriti: "text-blue-400", yeswehack: "text-emerald-400",
+                  };
+                  return (
+                    <div key={prog.id} className={`transition-all ${open ? "bg-cyan-500/[0.03]" : "hover:bg-white/[0.015]"}`}>
+                      <div className="px-4 py-2.5 cursor-pointer" onClick={() => setExpandedProgram(open ? null : prog.id)}>
+                        <div className="flex items-center gap-2.5">
+                          <span className={`text-[9px] font-black uppercase tracking-wider w-[52px] text-center ${pc[prog.platform] ?? "text-slate-500"}`}>
+                            {prog.platform === "yeswehack" ? "YWH" : prog.platform === "hackerone" ? "H1" : prog.platform === "bugcrowd" ? "BC" : "INT"}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-xs text-white/90 font-medium truncate">{prog.name}</span>
+                              {prog.has_bounty && <span className="text-[8px] text-emerald-400 font-black">$</span>}
+                              {prog.scope_changed && <span className="text-[8px] text-amber-400 font-black">NEW</span>}
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-px text-[10px] text-slate-600">
+                              <span>{prog.scope_count} alvo{prog.scope_count !== 1 ? "s" : ""}</span>
+                              {prog.wildcard_count > 0 && <span className="text-cyan-500">{prog.wildcard_count}wc</span>}
+                              {prog.scope_preview.slice(0, 2).map((s, i) => (
+                                <span key={i} className="font-mono text-slate-700 truncate max-w-[120px]">{s}</span>
+                              ))}
+                            </div>
+                          </div>
+                          <span className="text-[10px] text-slate-700">{open ? "▲" : "▼"}</span>
+                        </div>
+                      </div>
+                      {open && (
+                        <div className="px-4 pb-3 pt-0.5 space-y-2">
+                          <div className="flex flex-wrap gap-1">
+                            {prog.in_scope.map((s, i) => {
+                              const wc = s.startsWith("*.") || s.startsWith("*");
+                              return (
+                                <span key={i} className={`text-[9px] font-mono px-1.5 py-px rounded border ${
+                                  wc ? "bg-cyan-500/10 text-cyan-300/80 border-cyan-500/15" : "bg-white/[0.03] text-slate-400 border-white/[0.04]"
+                                }`}>{s}</span>
+                              );
+                            })}
+                          </div>
+                          {prog.out_of_scope.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              <span className="text-[8px] text-rose-500/50 font-bold uppercase">Out:</span>
+                              {prog.out_of_scope.slice(0, 10).map((s, i) => (
+                                <span key={i} className="text-[9px] font-mono px-1.5 py-px rounded bg-rose-500/5 text-rose-400/50 border border-rose-500/8">{s}</span>
+                              ))}
+                            </div>
+                          )}
+                          <div className="flex items-center justify-between pt-1">
+                            <div className="flex gap-2 text-[9px] text-slate-600">
+                              {prog.asset_types.length > 0 && <span>{prog.asset_types.join(" · ")}</span>}
+                              {prog.bounty_max != null && prog.bounty_max > 0 && <span className="text-emerald-500">max ${prog.bounty_max.toLocaleString()}</span>}
+                            </div>
+                            {prog.url && (
+                              <a href={prog.url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
+                                className="text-[10px] text-cyan-400 hover:text-cyan-300 font-bold">
+                                Abrir ↗
+                              </a>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+          </div>
+        )}
+
+      </div>
+
+      {/* Slide-in animation */}
+      <style jsx global>{`
+        @keyframes slideIn {
+          from { opacity: 0; transform: translateX(20px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+      `}</style>
     </div>
   );
 }

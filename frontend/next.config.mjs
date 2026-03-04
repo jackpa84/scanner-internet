@@ -1,6 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
+  compress: true,
+  poweredByHeader: false,
   async rewrites() {
     const backend = process.env.API_BACKEND_URL || "http://localhost:5001";
     return [
@@ -10,8 +12,8 @@ const nextConfig = {
   webpack: (config) => {
     if (process.env.WATCHPACK_POLLING === "true") {
       config.watchOptions = {
-        poll: 1000,
-        aggregateTimeout: 300,
+        poll: 500,
+        aggregateTimeout: 200,
       };
     }
     return config;

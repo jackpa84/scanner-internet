@@ -163,31 +163,6 @@ def _enrich_vulnerability(
         "updated_at": datetime.utcnow(),
     }
     
-    return enriched 
-            "1. Review vulnerability details\n2. Apply security patches\n3. Test thoroughly\n4. Deploy to production")),
-        
-        # Impact (from template with domain fallback)
-        "impact": vuln.get("impact", template.get("impact_template", 
-            "This vulnerability could allow attackers to compromise the system.")),
-        
-        # Source & tracking
-        "source": vuln.get("source", "nuclei"),
-        "scanner": vuln.get("scanner", "nuclei"),
-        "scan_id": scan_id,
-        "timestamp": datetime.utcnow(),
-        
-        # Status
-        "status": "confirmed",
-        "confirmed_at": datetime.utcnow(),
-        
-        # Additional metadata
-        "tags": [severity, vuln_type, "automated_scan"],
-        "metadata": {
-            "original_vuln": vuln,
-            "enriched_at": datetime.utcnow().isoformat(),
-        }
-    }
-    
     return enriched
 
 

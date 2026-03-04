@@ -1,6 +1,6 @@
 "use client";
 
-import { Fragment, useEffect, useState, useCallback } from "react";
+import { Fragment, useEffect, useState, useCallback, useRef } from "react";
 import Modal from "@/components/Modal";
 import {
   fetchBountyPrograms,
@@ -482,6 +482,9 @@ export default function BountyPanel() {
   const [showProgramList, setShowProgramList] = useState(false);
   const [programSearch, setProgramSearch] = useState("");
 
+  // Prevent concurrent loadPrograms calls to avoid UI freeze
+  const loadingRef = useRef(false);
+
   const handleBugScraperSync = async () => {
     try {
       setBugScraperLoading(true);
@@ -532,6 +535,10 @@ export default function BountyPanel() {
   };
 
   const loadPrograms = useCallback(async () => {
+    // Prevent concurrent calls to avoid UI freeze
+    if (loadingRef.current) return;
+    loadingRef.current = true;
+
     try {
       const [p, s] = await Promise.all([fetchBountyPrograms(), fetchBountyStats()]);
       const firstList = Array.isArray(p) ? p : [];
@@ -563,23 +570,39 @@ export default function BountyPanel() {
       }
 
       setH1EligibleLoading(true);
-      const byProgram = await Promise.all(
-        h1Programs.map(async (prog) => {
-          try {
-            const programTargets = await fetchBountyTargets(prog.id);
-            return (Array.isArray(programTargets) ? programTargets : [])
-              .filter(targetFulfillsHackerOneRules)
-              .map((target) => ({
-                program: prog,
-                target,
-                severity: maxSeverity(target.recon_checks?.findings ?? []),
-                findings: target.recon_checks?.total_findings ?? 0,
-              }));
-          } catch {
-            return [] as H1EligibleReport[];
+      
+      // Batch fetch to avoid overwhelming the UI - process max 5 concurrently
+      const batchSize = 5;
+      const byProgram: H1EligibleReport[][] = [];
+      for (let i = 0; i < h1Programs.length; i += batchSize) {
+        const batch = h1Programs.slice(i, i + batchSize);
+        const batchResults = await Promise.allSettled(
+          batch.map(async (prog) => {
+            try {
+              const programTargets = await fetchBountyTargets(prog.id);
+              return (Array.isArray(programTargets) ? programTargets : [])
+                .filter(targetFulfillsHackerOneRules)
+                .map((target) => ({
+                  program: prog,
+                  target,
+                  severity: maxSeverity(target.recon_checks?.findings ?? []),
+                  findings: target.recon_checks?.total_findings ?? 0,
+                }));
+            } catch {
+              return [] as H1EligibleReport[];
+            }
+          })
+        );
+        
+        for (const result of batchResults) {
+          if (result.status === "fulfilled") {
+            byProgram.push(result.value);
+          } else {
+            byProgram.push([]);
           }
-        })
-      );
+        }
+      }
+      
       const sevRank: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
       const flattened = byProgram
         .flat()
@@ -589,6 +612,7 @@ export default function BountyPanel() {
       console.error("BountyPanel load error:", e);
     } finally {
       setH1EligibleLoading(false);
+      loadingRef.current = false;
     }
   }, []);
 

@@ -56,6 +56,13 @@ from app.graphql_scanner import scan_graphql
 from app.race_condition_scanner import scan_target_for_race
 from app.interactsh_client import generate_payload, INTERACTSH_ENABLED
 from app.report_generator import deduplicate_findings, calculate_confidence
+from app.ai_analyzer import (
+    AI_ENABLED as _AI_ENABLED,
+    ai_prioritize_targets,
+    ai_analyze_findings,
+    ai_find_vuln_chains,
+    ai_generate_program_report,
+)
 
 logger = logging.getLogger("scanner.bounty")
 
@@ -419,7 +426,7 @@ def run_all_subdomain_sources(domain: str) -> set[str]:
     for t in threads:
         t.start()
     for t in threads:
-        t.join(timeout=60)
+        t.join(timeout=SUBFINDER_TIMEOUT)
 
     counts = {k: len(v) for k, v in results.items() if v}
     total_unique = len(all_subs)
@@ -434,16 +441,27 @@ def run_all_subdomain_sources(domain: str) -> set[str]:
 # DNS resolve
 # ---------------------------------------------------------------------------
 def resolve_dns(subdomains: list[str]) -> dict[str, list[str]]:
-    """Resolve subdomains to IP addresses. Returns {subdomain: [ips]}."""
+    """Resolve subdomains to IP addresses in parallel. Returns {subdomain: [ips]}."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     resolved = {}
-    for sub in subdomains:
+
+    def _resolve_one(sub: str) -> tuple[str, list[str]]:
         try:
-            results = socket.getaddrinfo(sub, None, socket.AF_INET, socket.SOCK_STREAM)
-            ips = sorted({r[4][0] for r in results})
+            res = socket.getaddrinfo(sub, None, socket.AF_INET, socket.SOCK_STREAM)
+            ips = sorted({r[4][0] for r in res})
+            return sub, ips
+        except (socket.gaierror, OSError):
+            return sub, []
+
+    workers = min(200, max(50, len(subdomains)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_resolve_one, sub): sub for sub in subdomains}
+        for fut in as_completed(futures):
+            sub, ips = fut.result()
             if ips:
                 resolved[sub] = ips
-        except (socket.gaierror, OSError):
-            continue
+
     logger.info("[BOUNTY] DNS resolve: %d/%d resolvidos", len(resolved), len(subdomains))
     return resolved
 
@@ -1536,6 +1554,16 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         nuclei_queued = _auto_queue_bounty_targets_for_nuclei()
         logger.info("[RECON] [15/15] %d targets enfileirados para Nuclei", nuclei_queued)
 
+        # --- AI Analysis (non-blocking background thread) ---
+        if _AI_ENABLED and alive_hosts:
+            logger.info("[RECON] [AI] Iniciando análise AI em background para %d alvos...", len(alive_hosts))
+            _prog_snap = dict(program)
+            threading.Thread(
+                target=_ai_analyze_recon_results,
+                args=(program_id, prog_name, _prog_snap),
+                daemon=True,
+            ).start()
+
         # --- Etapa 16: Auto-submit eligible to HackerOne ---
         h1_submitted = []
         if AUTO_SUBMIT_H1 and "hackerone.com" in (program.get("url") or ""):
@@ -1619,6 +1647,127 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         }})
         logger.error("[BOUNTY] Recon falhou em '%s': %s", program.get("name", "?"), e)
         raise
+
+
+# ---------------------------------------------------------------------------
+# AI Recon Analysis (background)
+# ---------------------------------------------------------------------------
+
+def _ai_analyze_recon_results(program_id: str, program_name: str, program: dict) -> None:
+    """Run AI analysis on recon results and persist enrichments. Runs in a daemon thread."""
+    programs_col = get_bounty_programs()
+    targets_col = get_bounty_targets()
+
+    try:
+        oid = ObjectId(program_id)
+    except Exception:
+        return
+
+    now = datetime.utcnow()
+
+    targets = list(targets_col.find({"program_id": oid, "alive": True}))
+    if not targets:
+        logger.info("[RECON] [AI] Nenhum alvo alive encontrado, análise AI ignorada")
+        return
+
+    targets_with_findings = [
+        t for t in targets
+        if (t.get("recon_checks") or {}).get("findings")
+    ]
+
+    logger.info("[RECON] [AI] Iniciando análise: %d alive, %d com findings",
+                len(targets), len(targets_with_findings))
+
+    # 1. Findings Analysis — enriquece findings com impacto e guidance da IA
+    for target in targets_with_findings[:20]:
+        findings = (target.get("recon_checks") or {}).get("findings", [])
+        if not findings:
+            continue
+        try:
+            enriched = ai_analyze_findings(findings, target.get("domain", ""))
+            if enriched:
+                enrichment_map = {e["code"]: e for e in enriched if "code" in e}
+                updated_findings = []
+                for f in findings:
+                    code = f.get("code", "")
+                    if code in enrichment_map:
+                        f = dict(f)
+                        f["ai_impact"] = enrichment_map[code].get("ai_impact", "")
+                        f["ai_guidance"] = enrichment_map[code].get("ai_guidance", "")
+                    updated_findings.append(f)
+                targets_col.update_one(
+                    {"_id": target["_id"]},
+                    {"$set": {
+                        "recon_checks.findings": updated_findings,
+                        "ai_findings_analyzed": True,
+                        "ai_findings_analyzed_at": now,
+                    }},
+                )
+        except Exception as e:
+            logger.warning("[RECON] [AI] findings analysis erro em %s: %s", target.get("domain"), e)
+        time.sleep(0.5)
+
+    # 2. Vulnerability Chains — por target
+    for target in targets_with_findings[:15]:
+        findings = (target.get("recon_checks") or {}).get("findings", [])
+        if len(findings) < 2:
+            continue
+        try:
+            chains = ai_find_vuln_chains(findings, target.get("domain", ""))
+            if chains:
+                targets_col.update_one(
+                    {"_id": target["_id"]},
+                    {"$set": {
+                        "ai_vuln_chains": chains,
+                        "ai_chains_analyzed_at": now,
+                    }},
+                )
+        except Exception as e:
+            logger.warning("[RECON] [AI] vuln chains erro em %s: %s", target.get("domain"), e)
+        time.sleep(0.5)
+
+    # 3. Target Prioritization — ranqueia todos os alvos alive
+    try:
+        ranked = ai_prioritize_targets(targets, program_name)
+        if ranked:
+            rank_map = {r["domain"]: r for r in ranked if "domain" in r}
+            for target in targets:
+                domain = target.get("domain", "")
+                if domain in rank_map:
+                    rd = rank_map[domain]
+                    targets_col.update_one(
+                        {"_id": target["_id"]},
+                        {"$set": {
+                            "ai_priority": {
+                                "rank": rd.get("priority_rank"),
+                                "attack_angle": rd.get("attack_angle", ""),
+                                "reasoning": rd.get("reasoning", ""),
+                                "key_findings": rd.get("key_findings", []),
+                                "analyzed_at": now,
+                            }
+                        }},
+                    )
+    except Exception as e:
+        logger.warning("[RECON] [AI] target prioritization erro: %s", e)
+
+    # 4. Consolidated Program Report
+    try:
+        report = ai_generate_program_report(program, targets_with_findings)
+        if report:
+            programs_col.update_one(
+                {"_id": oid},
+                {"$set": {
+                    "ai_report": {
+                        **report,
+                        "generated_at": now,
+                        "targets_analyzed": len(targets_with_findings),
+                    }
+                }},
+            )
+    except Exception as e:
+        logger.warning("[RECON] [AI] program report erro: %s", e)
+
+    logger.info("[RECON] [AI] Análise concluída para programa '%s'", program_name)
 
 
 # ---------------------------------------------------------------------------

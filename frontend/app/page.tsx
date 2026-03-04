@@ -4,16 +4,13 @@ import { Component, type ReactNode, useEffect, useState, useCallback, useRef } f
 import BountyPanel from "@/components/BountyPanel";
 import VulnPanel from "@/components/VulnPanel";
 import {
-  fetchHealth,
   fetchBountyStats,
   fetchVulnStats,
-  fetchScannerStats,
   fetchROIDashboard,
   fetchPrioritizedPrograms,
   fetchRecentChanges,
   fetchSubmittedReportsStats,
   fetchRecentCVEs,
-  fetchBlindVulns,
   fetchAIStats,
   fetchBountyPrograms,
   triggerBountyRecon,
@@ -23,17 +20,32 @@ import {
   triggerCVECheck,
   recordEarning,
   importIntigrtiPrograms,
-  type HealthInfo,
+  fetchVulnResults,
+  fetchActivityLogs,
+  type VulnResult,
+  type ActivityLogEntry,
   type BountyStats,
   type VulnStats,
-  type ScannerStats,
   type ROIDashboard,
   type PrioritizedProgram,
   type BountyChange,
   type SubmittedReportsStats,
   type AIStats,
   type BountyProgram,
+  fetchWatcherStatus,
+  triggerWatcherCheck,
+  triggerWatcherCheckSingle,
+  fetchBugHuntPrograms,
+  type WatcherStatusResponse,
+  type WatcherCheckResponse,
+  type BugHuntProgram,
+  fetchH1Stats,
+  fetchH1Queue,
+  triggerH1AutoSubmit,
+  type H1Stats,
+  type H1QueueItem,
 } from "@/lib/api";
+import Modal from "@/components/Modal";
 
 /* ═══════════════════════════════════════════════════════════════
    Error Boundary
@@ -77,35 +89,6 @@ function Tooltip({ text, children, className = "" }: { text: string; children: R
   );
 }
 
-function Metric({ label, value, color, sub, icon }: { label: string; value: string | number; color?: string; sub?: string; icon?: string }) {
-  return (
-    <div className="min-w-0">
-      <div className="flex items-center gap-1.5">
-        {icon && <span className="text-base opacity-80">{icon}</span>}
-        <div className={`text-2xl font-bold tabular-nums leading-none ${color || "text-[var(--foreground)]"}`}>
-          {typeof value === "number" ? value.toLocaleString() : value}
-        </div>
-      </div>
-      <div className="text-[10px] text-[var(--muted)] mt-1.5 uppercase tracking-wider leading-none truncate">{label}</div>
-      <div className="text-[10px] text-[var(--muted)] mt-0.5 truncate h-4">{sub || ""}</div>
-    </div>
-  );
-}
-
-function SevBar({ c, h, m, l, i }: { c: number; h: number; m: number; l: number; i: number }) {
-  const total = c + h + m + l + i;
-  if (total === 0) return <div className="w-full h-2.5 rounded-full bg-white/5" />;
-  return (
-    <div className="flex h-2.5 rounded-full overflow-hidden gap-px">
-      {c > 0 && <div style={{ width: `${(c / total) * 100}%` }} className="bg-red-500 first:rounded-l-full last:rounded-r-full" />}
-      {h > 0 && <div style={{ width: `${(h / total) * 100}%` }} className="bg-orange-500 first:rounded-l-full last:rounded-r-full" />}
-      {m > 0 && <div style={{ width: `${(m / total) * 100}%` }} className="bg-amber-500 first:rounded-l-full last:rounded-r-full" />}
-      {l > 0 && <div style={{ width: `${(l / total) * 100}%` }} className="bg-sky-500 first:rounded-l-full last:rounded-r-full" />}
-      {i > 0 && <div style={{ width: `${(i / total) * 100}%` }} className="bg-slate-600 first:rounded-l-full last:rounded-r-full" />}
-    </div>
-  );
-}
-
 function Donut({ value, total, color, size = 52 }: { value: number; total: number; color: string; size?: number }) {
   const r = (size - 6) / 2;
   const c = 2 * Math.PI * r;
@@ -134,54 +117,28 @@ const TIER_COLORS: Record<string, string> = {
    Card wrapper
    ═══════════════════════════════════════════════════════════════ */
 
-function Card({ children, className = "", title, accent, action, glow }: {
+function Card({ children, className = "", title, accent, action, glow, onClick, clickHint }: {
   children: ReactNode; className?: string; title?: string; accent?: string;
-  action?: ReactNode; glow?: string;
+  action?: ReactNode; glow?: string; onClick?: () => void; clickHint?: string;
 }) {
   return (
-    <div className={`rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 card-glow h-full ${className}`}
-      style={glow ? { boxShadow: `inset 0 1px 0 0 ${glow}` } : undefined}>
+    <div className={`rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 card-glow h-full ${onClick ? 'cursor-pointer hover:border-[var(--accent)]/30 transition-all duration-200 group/card' : ''} ${className}`}
+      style={glow ? { boxShadow: `inset 0 1px 0 0 ${glow}` } : undefined}
+      onClick={onClick}>
       {title && (
         <div className="flex items-center justify-between mb-2.5">
           <h3 className={`text-xs font-semibold uppercase tracking-wider ${accent || "text-[var(--muted)]"}`}>{title}</h3>
-          {action}
+          <div className="flex items-center gap-2">
+            {action}
+            {onClick && (
+              <span className="text-[9px] text-[var(--muted)] opacity-0 group-hover/card:opacity-100 transition-opacity flex items-center gap-1">
+                {clickHint || "detalhes"} <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" /></svg>
+              </span>
+            )}
+          </div>
         </div>
       )}
       {children}
-    </div>
-  );
-}
-
-function MetricCard({ children, accentColor, bg, className = "" }: { children: ReactNode; accentColor: string; bg?: string; className?: string }) {
-  return (
-    <div className={`metric-card rounded-xl border border-[var(--border)] p-4 card-glow h-full ${className}`}
-      style={{
-        "--metric-accent": accentColor,
-        background: bg || "var(--card)",
-      } as React.CSSProperties}>
-      {children}
-    </div>
-  );
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   Scanner Status Grid
-   ═══════════════════════════════════════════════════════════════ */
-
-function ScannerStatusItem({ name, icon, found, tested, color }: {
-  name: string; icon: string; found: number; tested: number; color: string;
-}) {
-  return (
-    <div className="flex items-center gap-2 py-1.5 px-2 rounded-lg hover:bg-white/[0.02] transition-colors group">
-      <span className="text-sm group-hover:scale-110 transition-transform">{icon}</span>
-      <div className="flex-1 min-w-0">
-        <div className="text-xs font-medium text-[var(--foreground)] truncate">{name}</div>
-      </div>
-      {found > 0 ? (
-        <span className={`text-xs font-bold tabular-nums ${color}`}>{found}</span>
-      ) : (
-        <span className="text-xs text-[var(--muted)] tabular-nums">{tested > 0 ? tested : "–"}</span>
-      )}
     </div>
   );
 }
@@ -285,11 +242,11 @@ function ReportSubmissionCard({ reportStats, roi }: { reportStats: SubmittedRepo
               </button>
             </div>
 
-            <div className="p-6 space-y-6">
+            <div className="p-3 sm:p-4 md:p-6 space-y-4 sm:space-y-6">
               {/* Status cards */}
               <div>
                 <div className="text-[11px] text-[var(--muted)] uppercase font-semibold mb-3">Status dos Reports</div>
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 sm:gap-3">
                   {[
                     { label: "Submitted", val: submitted, c: "text-violet-400", bg: "bg-violet-500/8 border-violet-500/15", desc: "Enviados com sucesso à plataforma de bug bounty." },
                     { label: "Accepted", val: accepted, c: "text-emerald-400", bg: "bg-emerald-500/8 border-emerald-500/15", desc: "Aceitos pelo triager. Elegíveis para receber bounty." },
@@ -297,9 +254,9 @@ function ReportSubmissionCard({ reportStats, roi }: { reportStats: SubmittedRepo
                     { label: "Pending", val: pending, c: "text-amber-400", bg: "bg-amber-500/8 border-amber-500/15", desc: "Aguardando análise do triager. Tempo médio: 1-7 dias." },
                   ].map(s => (
                     <Tooltip key={s.label} text={s.desc}>
-                      <div className={`text-center p-4 rounded-xl border ${s.bg}`}>
-                        <div className={`text-3xl font-bold tabular-nums ${s.c}`}>{s.val}</div>
-                        <div className="text-[9px] text-[var(--muted)] uppercase mt-1">{s.label}</div>
+                      <div className={`text-center p-2 sm:p-4 rounded-xl border ${s.bg}`}>
+                        <div className={`text-xl sm:text-3xl font-bold tabular-nums ${s.c}`}>{s.val}</div>
+                        <div className="text-[8px] sm:text-[9px] text-[var(--muted)] uppercase mt-1">{s.label}</div>
                       </div>
                     </Tooltip>
                   ))}
@@ -355,7 +312,7 @@ function ReportSubmissionCard({ reportStats, roi }: { reportStats: SubmittedRepo
               {/* Platforms */}
               <div>
                 <div className="text-[11px] text-[var(--muted)] uppercase font-semibold mb-3">Plataformas Suportadas</div>
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
                   {[
                     { name: "HackerOne", icon: "🟢", c: "border-green-500/20 bg-green-500/5 text-green-400", auto: true, desc: "Envio automático via API. Configure HACKERONE_API_USERNAME e HACKERONE_API_TOKEN no .env." },
                     { name: "Bugcrowd", icon: "🟠", c: "border-orange-500/20 bg-orange-500/5 text-orange-400", auto: false, desc: "Sem API para researchers. Use o botão 'Copy for Bugcrowd' e cole no formulário do site." },
@@ -405,54 +362,66 @@ function ReportSubmissionCard({ reportStats, roi }: { reportStats: SubmittedRepo
 }
 
 export default function Home() {
-  const [health, setHealth] = useState<HealthInfo | null>(null);
   const [bounty, setBounty] = useState<BountyStats | null>(null);
   const [vuln, setVuln] = useState<VulnStats | null>(null);
-  const [scanners, setScanners] = useState<ScannerStats | null>(null);
   const [roi, setRoi] = useState<ROIDashboard | null>(null);
   const [programs, setPrograms] = useState<PrioritizedProgram[]>([]);
   const [changes, setChanges] = useState<BountyChange[]>([]);
   const [reportStats, setReportStats] = useState<SubmittedReportsStats | null>(null);
   const [recentCVEs, setRecentCVEs] = useState<any[]>([]);
-  const [blindVulns, setBlindVulns] = useState<any[]>([]);
   const [aiStats, setAiStats] = useState<AIStats | null>(null);
   const [allPrograms, setAllPrograms] = useState<BountyProgram[]>([]);
   const [reconTriggering, setReconTriggering] = useState<Set<string>>(new Set());
   const [actionMsg, setActionMsg] = useState("");
   const [activeTab, setActiveTab] = useState<"overview" | "programs" | "vulns">("overview");
+  const [activityLogs, setActivityLogs] = useState<ActivityLogEntry[]>([]);
+  const [logsPaused, setLogsPaused] = useState(false);
+  const termRef = useRef<HTMLDivElement>(null);
+  const [bughuntPrograms, setBughuntPrograms] = useState<BugHuntProgram[]>([]);
+  const [bughuntExpanded, setBughuntExpanded] = useState<string | null>(null);
+  const [h1Stats, setH1Stats] = useState<H1Stats | null>(null);
+  const [h1Queue, setH1Queue] = useState<H1QueueItem[]>([]);
+  const [h1Submitting, setH1Submitting] = useState(false);
+  const [h1Msg, setH1Msg] = useState("");
+  const [activeModal, setActiveModal] = useState<string | null>(null);
 
   const loadFast = useCallback(async () => {
     const results = await Promise.allSettled([
-      fetchHealth(),
       fetchBountyStats(),
       fetchVulnStats(),
     ]);
-    if (results[0].status === "fulfilled") setHealth(results[0].value);
-    if (results[1].status === "fulfilled") setBounty(results[1].value);
-    if (results[2].status === "fulfilled") setVuln(results[2].value);
+    if (results[0].status === "fulfilled") setBounty(results[0].value);
+    if (results[1].status === "fulfilled") setVuln(results[1].value);
   }, []);
 
   const loadSlow = useCallback(async () => {
     const results = await Promise.allSettled([
-      fetchScannerStats(),
       fetchROIDashboard(),
       fetchPrioritizedPrograms(0),
       fetchRecentChanges(10),
       fetchSubmittedReportsStats(),
       fetchRecentCVEs(),
-      fetchBlindVulns(),
       fetchAIStats(),
       fetchBountyPrograms(),
     ]);
-    if (results[0].status === "fulfilled") setScanners(results[0].value);
-    if (results[1].status === "fulfilled") setRoi(results[1].value);
-    if (results[2].status === "fulfilled") setPrograms(results[2].value);
-    if (results[3].status === "fulfilled") setChanges(results[3].value);
-    if (results[4].status === "fulfilled") setReportStats(results[4].value);
-    if (results[5].status === "fulfilled") setRecentCVEs(results[5].value);
-    if (results[6].status === "fulfilled") setBlindVulns(results[6].value);
-    if (results[7].status === "fulfilled") setAiStats(results[7].value);
-    if (results[8].status === "fulfilled") setAllPrograms(results[8].value);
+    if (results[0].status === "fulfilled") setRoi(results[0].value);
+    if (results[1].status === "fulfilled") setPrograms(results[1].value);
+    if (results[2].status === "fulfilled") setChanges(results[2].value);
+    if (results[3].status === "fulfilled") setReportStats(results[3].value);
+    if (results[4].status === "fulfilled") setRecentCVEs(results[4].value);
+    if (results[5].status === "fulfilled") setAiStats(results[5].value);
+    if (results[6].status === "fulfilled") setAllPrograms(results[6].value);
+    // BugHunt programs
+    try {
+      const bh = await fetchBugHuntPrograms({ limit: 200 });
+      setBughuntPrograms(bh.programs || []);
+    } catch { /* silent */ }
+    // H1 Auto-Submit stats
+    try {
+      const [stats, queue] = await Promise.all([fetchH1Stats(), fetchH1Queue()]);
+      setH1Stats(stats);
+      setH1Queue(queue.reports || []);
+    } catch { /* silent */ }
   }, []);
 
   useEffect(() => {
@@ -463,9 +432,28 @@ export default function Home() {
     return () => { clearInterval(fastId); clearInterval(slowId); };
   }, [loadFast, loadSlow]);
 
-  const ss = health?.scan_stats;
+  /* ── Activity log polling ── */
+  useEffect(() => {
+    if (logsPaused) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetchActivityLogs(60);
+        if (!cancelled) {
+          setActivityLogs(res.logs);
+          // auto-scroll
+          requestAnimationFrame(() => {
+            if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
+          });
+        }
+      } catch { /* silent */ }
+    };
+    poll();
+    const id = setInterval(poll, 3000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [logsPaused]);
+
   const recon = bounty?.recon;
-  const scanner = vuln?.scanner;
   const sev = vuln?.by_severity;
 
   const tabs = [
@@ -479,106 +467,955 @@ export default function Home() {
       {/* ── Tab Navigation ── */}
       <div className="flex items-center gap-1 bg-[var(--card)] border border-[var(--border)] rounded-xl p-1 w-fit">
         {tabs.map(t => (
-          <button key={t.id} onClick={() => setActiveTab(t.id)}
+          <button
+            key={t.id}
+            onClick={() => setActiveTab(t.id)}
             className={`px-4 py-2 text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 ${
               activeTab === t.id
                 ? "bg-[var(--accent)]/15 text-[var(--accent-light)] shadow-sm shadow-[var(--accent)]/10"
                 : "text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-white/[0.02]"
-            }`}><span>{t.icon}</span>{t.label}</button>
+            }`}
+          >
+            <span>{t.icon}</span>
+            {t.label}
+          </button>
         ))}
       </div>
 
       {activeTab === "overview" && (
         <>
-          {/* ══════════ PIPELINE: 8 Etapas do Relatório ══════════ */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-            {[
-              { step: 1, icon: "📋", label: "Programas", val: bounty?.programs ?? 0, done: (bounty?.programs ?? 0) > 0, sub: `${bounty?.programs_with_bounty ?? 0} bounty`, color: "#6366f1", bg: "rgba(99,102,241,0.06)", tip: "Programas importados de HackerOne,\nBugcrowd, Intigriti, YesWeHack, BugHunt.\nUse Quick Actions para importar mais." },
-              { step: 2, icon: "🔍", label: "Recon", val: recon?.recons_completed ?? 0, done: (recon?.recons_completed ?? 0) > 0, sub: `${recon?.subdomains_found ?? 0} subs`, color: "#06b6d4", bg: "rgba(6,182,212,0.06)", tip: "Reconhecimento automático.\nsubfinder, crt.sh, httpx, dnsx, rDNS.\nDescobre subdomínios e verifica alive." },
-              { step: 3, icon: "🎯", label: "Targets", val: bounty?.alive_targets ?? 0, done: (bounty?.alive_targets ?? 0) > 0, sub: `${bounty?.targets ?? 0} total`, color: "#10b981", bg: "rgba(16,185,129,0.06)", tip: "Targets vivos respondendo HTTP.\nAlvos ativos prontos para scan.\n+ novos = menos proteção." },
-              { step: 4, icon: "⚠️", label: "Vulns", val: vuln?.total_vulns ?? 0, done: (vuln?.total_vulns ?? 0) > 0, sub: sev ? `${sev.critical}C ${sev.high}H` : "", color: "#f59e0b", bg: "rgba(245,158,11,0.06)", tip: "Vulnerabilidades encontradas.\nNuclei, Nmap, dalfox, sqlmap.\nCritical + High geram mais bounty." },
-              { step: 5, icon: "📝", label: "Reports", val: reportStats?.total ?? 0, done: (reportStats?.total ?? 0) > 0, sub: `${reportStats?.submitted ?? 0} sent`, color: "#8b5cf6", bg: "rgba(139,92,246,0.06)", tip: "Reports gerados pela AI ou template.\nInclui título, CVSS, PoC, steps,\nimpacto e remediação." },
-              { step: 6, icon: "📤", label: "Enviados", val: reportStats?.submitted ?? 0, done: (reportStats?.submitted ?? 0) > 0, sub: `${reportStats?.errors ?? 0} err`, color: "#3b82f6", bg: "rgba(59,130,246,0.06)", tip: "Reports submetidos às plataformas.\nHackerOne (auto), Bugcrowd (copy),\nIntigriti, YesWeHack, BugHunt." },
-              { step: 7, icon: "✅", label: "Aceitos", val: roi?.operations.reports_accepted ?? 0, done: (roi?.operations.reports_accepted ?? 0) > 0, sub: `${roi?.operations.acceptance_rate ?? 0}%`, color: "#10b981", bg: "rgba(16,185,129,0.06)", tip: "Reports aceitos pelo triager.\nTaxa de aceitação acima de 50%\né considerada boa." },
-              { step: 8, icon: "💰", label: "Bounty", val: roi ? `$${roi.summary.total_earnings}` : "$0", done: (roi?.summary.total_earnings ?? 0) > 0, sub: roi?.summary.highest_payout ? `max $${roi.summary.highest_payout}` : "", color: "#10b981", bg: "rgba(16,185,129,0.08)", tip: "Bounties recebidos.\nTotal ganho em todas as plataformas.\nAcompanhe seu ROI por programa." },
-            ].map(s => (
-              <Tooltip key={s.step} text={s.tip}>
-                <div className={`metric-card rounded-xl border p-3 card-glow h-full ${s.done ? "border-[var(--border)]" : "border-[var(--border)] opacity-60"}`}
-                  style={{ "--metric-accent": s.color, background: `linear-gradient(135deg, ${s.bg} 0%, var(--card) 70%)` } as React.CSSProperties}>
-                  <div className="flex items-center gap-1 mb-1">
-                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] shrink-0 ${
-                      s.done ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30" : "bg-white/5 text-[var(--muted)] border border-[var(--border)]"
-                    }`}>{s.done ? "✓" : s.step}</span>
-                    <span className="text-base">{s.icon}</span>
-                  </div>
-                  <div className={`text-xl font-bold tabular-nums leading-none ${s.done ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
-                    {typeof s.val === "number" ? s.val.toLocaleString() : s.val}
-                  </div>
-                  <div className="text-[9px] text-[var(--muted)] mt-1 uppercase tracking-wider truncate">{s.label}</div>
-                  <div className="text-[9px] text-[var(--muted)] mt-0.5 truncate h-3">{s.sub}</div>
+          {/* ══════════ PIPELINE → HackerOne ══════════ */}
+          <div className="rounded-2xl border border-indigo-500/20 bg-gradient-to-br from-indigo-500/8 via-[var(--card)] to-purple-500/5 overflow-hidden relative glow-indigo">
+            {/* Decorative blur elements */}
+            <div className="absolute inset-0 pointer-events-none">
+              <div className="absolute -top-32 -right-32 w-64 h-64 bg-indigo-500/10 rounded-full blur-3xl" />
+              <div className="absolute -bottom-32 -left-32 w-64 h-64 bg-purple-500/8 rounded-full blur-3xl" />
+            </div>
+            
+            {/* Header */}
+            <div className="relative px-4 sm:px-6 py-4 sm:py-5 border-b border-indigo-500/15 flex items-center justify-between backdrop-blur-sm">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-indigo-500/25 border border-indigo-400/30 flex items-center justify-center text-base shadow-lg shadow-indigo-500/20">🚀</div>
+                <div>
+                  <h3 className="text-sm font-bold text-indigo-300 uppercase tracking-widest">Pipeline → HackerOne</h3>
+                  <p className="text-[10px] text-indigo-400/70 mt-1">Descubra, Analise, Reporte, Ganhe 💰</p>
                 </div>
-              </Tooltip>
-            ))}
+              </div>
+              <div className="flex items-center gap-3 sm:gap-4 text-[11px]">
+                <div className="hidden sm:flex items-center gap-4 space-x-3">
+                  <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 font-semibold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />Ativo
+                  </span>
+                  <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 border border-white/10 text-[var(--muted)]">
+                    <span className="w-2 h-2 rounded-full bg-white/30" />Pendente
+                  </span>
+                </div>
+                {/* Logout Button */}
+                <button 
+                  onClick={() => {
+                    if (typeof window !== 'undefined') {
+                      localStorage.clear();
+                      sessionStorage.clear();
+                      window.location.href = '/';
+                    }
+                  }}
+                  className="group flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gradient-to-r from-red-500/20 to-pink-500/20 border border-red-500/30 text-red-300 font-semibold hover:from-red-500/30 hover:to-pink-500/30 hover:border-red-500/50 hover:shadow-lg hover:shadow-red-500/20 transition-all duration-300"
+                  title="Sair da aplicação"
+                >
+                  <span className="text-base group-hover:scale-110 transition-transform duration-300">🚪</span>
+                  <span className="hidden sm:inline">Sair</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Pipeline Steps */}
+            <div className="relative px-4 sm:px-6 py-5 sm:py-6">
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-x-0 gap-y-4 sm:gap-y-5">
+                {[
+                  { n: 1, icon: "📋", label: "Programas", desc: "H1, Bugcrowd, Intigriti", val: bounty?.programs ?? 0, color: "indigo" },
+                  { n: 2, icon: "🔍", label: "Recon", desc: "subfinder, crt.sh, httpx", val: recon?.recons_completed ?? 0, color: "cyan" },
+                  { n: 3, icon: "🎯", label: "Targets", desc: "Hosts vivos para scan", val: bounty?.alive_targets ?? 0, color: "teal" },
+                  { n: 4, icon: "⚡", label: "Scan", desc: "Nuclei, Nmap, SQLi...", val: vuln?.total_vulns ?? 0, color: "amber" },
+                  { n: 5, icon: "📝", label: "Reports", desc: "PoC + CVSS + Steps", val: reportStats?.total ?? 0, color: "violet" },
+                  { n: 6, icon: "📤", label: "Enviados", desc: "Submit via API", val: reportStats?.submitted ?? 0, color: "blue" },
+                  { n: 7, icon: "✅", label: "Aceitos", desc: "Triaged pelo programa", val: roi?.operations.reports_accepted ?? 0, color: "emerald" },
+                  { n: 8, icon: "💰", label: "Bounty", desc: "Recompensa paga", val: roi?.summary.total_earnings ?? 0, color: "green", isMoney: true },
+                ].map((s, i) => {
+                  const active = s.isMoney ? (s.val as number) > 0 : (s.val as number) > 0;
+                  const colorMap: Record<string, { ring: string; bg: string; text: string; glow: string }> = {
+                    indigo:  { ring: "ring-indigo-500/40", bg: "bg-indigo-500/15", text: "text-indigo-400", glow: "shadow-indigo-500/20" },
+                    cyan:    { ring: "ring-cyan-500/40",   bg: "bg-cyan-500/15",   text: "text-cyan-400",   glow: "shadow-cyan-500/20" },
+                    teal:    { ring: "ring-teal-500/40",   bg: "bg-teal-500/15",   text: "text-teal-400",   glow: "shadow-teal-500/20" },
+                    amber:   { ring: "ring-amber-500/40",  bg: "bg-amber-500/15",  text: "text-amber-400",  glow: "shadow-amber-500/20" },
+                    violet:  { ring: "ring-violet-500/40", bg: "bg-violet-500/15", text: "text-violet-400", glow: "shadow-violet-500/20" },
+                    blue:    { ring: "ring-blue-500/40",   bg: "bg-blue-500/15",   text: "text-blue-400",   glow: "shadow-blue-500/20" },
+                    emerald: { ring: "ring-emerald-500/40",bg: "bg-emerald-500/15",text: "text-emerald-400",glow: "shadow-emerald-500/20" },
+                    green:   { ring: "ring-green-500/40",  bg: "bg-green-500/15",  text: "text-green-400",  glow: "shadow-green-500/20" },
+                  };
+                  const c = colorMap[s.color] ?? colorMap.indigo;
+                  return (
+                    <div key={s.n} className="flex items-center relative group">
+                      {/* Glow effect background */}
+                      {active && (
+                        <div className={`absolute -inset-4 rounded-3xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 blur-2xl pointer-events-none
+                          ${s.color === 'indigo' ? 'bg-indigo-500/20' :
+                            s.color === 'cyan' ? 'bg-cyan-500/20' :
+                            s.color === 'teal' ? 'bg-teal-500/20' :
+                            s.color === 'amber' ? 'bg-amber-500/20' :
+                            s.color === 'violet' ? 'bg-violet-500/20' :
+                            s.color === 'blue' ? 'bg-blue-500/20' :
+                            s.color === 'emerald' ? 'bg-emerald-500/20' :
+                            'bg-green-500/20'}`}
+                        />
+                      )}
+                      {/* Step card */}
+                      <div className="flex-1 flex flex-col items-center text-center relative z-10">
+                        {/* Circle with value */}
+                        <div className={`relative w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center ring-2 transition-all backdrop-blur-md
+                          ${active
+                            ? `${c.ring} ${c.bg} shadow-2xl ${c.glow} border border-${s.color}-400/50 group-hover:shadow-lg group-hover:scale-110 group-hover:backdrop-blur-lg`
+                            : "ring-white/10 bg-gradient-to-br from-white/8 to-white/3 border border-white/10 group-hover:from-white/12 group-hover:to-white/5"
+                          } before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:pointer-events-none ${
+                            active ? `before:from-${s.color}-400/10 before:to-transparent` : 'before:from-white/5 before:to-transparent'
+                          }`}>
+                          <span className={`text-xs sm:text-sm font-bold tabular-nums transition-colors ${active ? c.text : "text-[var(--muted)]"}`}>
+                            {s.isMoney ? `$${(s.val as number).toLocaleString()}` : (s.val as number).toLocaleString()}
+                          </span>
+                          {/* Step number badge */}
+                          <span className={`absolute -top-2 -right-2 w-5 h-5 sm:w-6 sm:h-6 rounded-full text-[8px] sm:text-[9px] font-bold flex items-center justify-center transition-all duration-300 shadow-lg
+                            ${active
+                              ? "bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-emerald-500/50 border border-emerald-300/60 group-hover:shadow-emerald-500/70 group-hover:scale-125"
+                              : "bg-gradient-to-br from-white/20 to-white/5 text-[var(--muted)] border border-white/20 group-hover:from-white/30 group-hover:to-white/10"
+                            }`}>{active ? "✓" : s.n}</span>
+                        </div>
+                        {/* Icon + Label */}
+                        <div className="mt-3 flex items-center gap-1.5 relative z-20">
+                          <span className="text-sm sm:text-base group-hover:scale-125 transition-transform duration-300">{s.icon}</span>
+                          <span className={`text-[10px] sm:text-xs font-bold transition-colors duration-300 ${active ? "text-[var(--foreground)] group-hover:text-${s.color}-300" : "text-[var(--muted)] group-hover:text-white/60"}`}>{s.label}</span>
+                        </div>
+                        {/* Description */}
+                        <span className="text-[8px] sm:text-[9px] text-[var(--muted)] mt-1.5 leading-tight max-w-[60px] sm:max-w-[70px] group-hover:text-[var(--foreground)]/70 transition-colors duration-300">{s.desc}</span>
+                      </div>
+                      {/* Arrow connector */}
+                      {i < 7 && (
+                        <div className="hidden lg:flex items-center shrink-0 -mx-1 group/arrow">
+                          <svg width="20" height="10" viewBox="0 0 20 10" className="text-white/15 group-hover/arrow:text-white/40 transition-all duration-300 group-hover/arrow:translate-x-1">
+                            <path d="M0 5h16m0 0l-3-3m3 3l-3 3" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Flow summary bar */}
+            <div className="relative px-4 sm:px-6 py-3 sm:py-4 border-t border-indigo-500/15 bg-gradient-to-r from-indigo-500/5 via-transparent to-purple-500/5 flex items-center justify-center gap-1.5 sm:gap-2.5 text-[9px] sm:text-[10px] overflow-x-auto backdrop-blur-sm">
+              <span className="text-indigo-300/70 font-semibold uppercase tracking-wider flex-shrink-0">📊 Fluxo:</span>
+              {[
+                { val: bounty?.programs ?? 0, c: "text-indigo-400" },
+                { val: recon?.recons_completed ?? 0, c: "text-cyan-400" },
+                { val: bounty?.alive_targets ?? 0, c: "text-teal-400" },
+                { val: vuln?.total_vulns ?? 0, c: "text-amber-400" },
+                { val: reportStats?.total ?? 0, c: "text-violet-400" },
+                { val: reportStats?.submitted ?? 0, c: "text-blue-400" },
+                { val: roi?.operations.reports_accepted ?? 0, c: "text-emerald-400" },
+                { val: roi?.summary.total_earnings ?? 0, c: "text-green-400", money: true },
+              ].map((s, i) => (
+                <span key={i} className="flex items-center gap-1.5 shrink-0">
+                  <span className={`font-bold tabular-nums ${s.c}`}>{s.money ? `$${s.val.toLocaleString()}` : s.val.toLocaleString()}</span>
+                  {i < 7 && <span className="text-white/15 font-light">→</span>}
+                </span>
+              ))}
+            </div>
+
+            {/* Success Rate Waterfall Chart */}
+            <div className="relative px-6 py-8 rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500/5 via-cyan-500/3 to-blue-500/5 backdrop-blur-md overflow-hidden">
+              {/* Background glow */}
+              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-emerald-500/20 blur-3xl pointer-events-none" />
+              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
+              
+              <div className="relative z-10">
+                {/* Header */}
+                <div className="mb-8">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-base font-bold text-[var(--foreground)] flex items-center gap-2">
+                        <span>🏆 Trilha do Sucesso</span>
+                      </h3>
+                      <div className="px-2 py-1 rounded-md bg-emerald-500/20 border border-emerald-500/30">
+                        <span className="text-[10px] font-bold text-emerald-300">Jornada Completa</span>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-xs font-semibold text-green-400">
+💰 ${((roi?.summary.total_earnings ?? 0) / Math.max(roi?.operations.reports_accepted ?? 1, 1)).toLocaleString(undefined, {maximumFractionDigits: 0})} por aceitação
+                      </div>
+                    </div>
+                  </div>
+                  <p className="text-[11px] text-[var(--muted)]">
+                    Acompanhe seu progresso desde descoberta de programas até recebimento de recompensas. Cada etapa traz você mais perto de ganhos reais.
+                  </p>
+                </div>
+
+                {/* Success Journey Timeline - Enhanced */}
+                <div className="relative mt-8">
+                  {/* Connection line */}
+                  <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-emerald-500/50 to-transparent transform -translate-y-1/2 pointer-events-none" />
+                  
+                  {/* Timeline nodes with detailed info */}
+                  <div className="grid grid-cols-7 gap-1 sm:gap-2 relative">
+                    {[
+                      { 
+                        icon: "📋", 
+                        label: "Programas", 
+                        val: bounty?.programs ?? 0, 
+                        color: "indigo",
+                        colorClass: "indigo-400",
+                        description: "Plataformas descobertas (H1, Bugcrowd, Intigriti)",
+                        tip: "Quantidade de programas de bug bounty registrados no sistema"
+                      },
+                      { 
+                        icon: "🔍", 
+                        label: "Recon", 
+                        val: recon?.recons_completed ?? 0, 
+                        color: "cyan",
+                        colorClass: "cyan-400",
+                        description: "Reconhecimentos completados",
+                        tip: "Quantos programas foram submetidos a reconhecimento (subfinder, httpx, etc)"
+                      },
+                      { 
+                        icon: "🎯", 
+                        label: "Targets", 
+                        val: bounty?.alive_targets ?? 0, 
+                        color: "teal",
+                        colorClass: "teal-400",
+                        description: "Hosts vivos identificados",
+                        tip: "Quantidade de domínios/IPs ativos que passaram no teste de conectividade"
+                      },
+                      { 
+                        icon: "⚡", 
+                        label: "Scans", 
+                        val: vuln?.total_vulns ?? 0, 
+                        color: "amber",
+                        colorClass: "amber-400",
+                        description: "Vulnerabilidades encontradas",
+                        tip: "Total de vulnerabilidades descobertas (críticas, altas, médias através de Nuclei, Nmap, etc)"
+                      },
+                      { 
+                        icon: "📝", 
+                        label: "Reports", 
+                        val: reportStats?.total ?? 0, 
+                        color: "violet",
+                        colorClass: "violet-400",
+                        description: "Relatórios criados",
+                        tip: "Quantidade de POCs com CVSS e instruções de reprodução prontos para envio"
+                      },
+                      { 
+                        icon: "📤", 
+                        label: "Enviados", 
+                        val: reportStats?.submitted ?? 0, 
+                        color: "blue",
+                        colorClass: "blue-400",
+                        description: "Submissions completados",
+                        tip: "Relatórios que foram enviados com sucesso à plataforma"
+                      },
+                      { 
+                        icon: "✅", 
+                        label: "Aceitos", 
+                        val: roi?.operations.reports_accepted ?? 0, 
+                        color: "emerald",
+                        colorClass: "emerald-400",
+                        description: "Vulnerabilidades validadas",
+                        tip: "Relatórios que foram triados e aceitos - elegíveis para recompensa"
+                      },
+                    ].map((step, idx) => {
+                      const isActive = (step.val as number) > 0;
+                      const nextVal = idx < 6 ? ([
+                        bounty?.programs ?? 0,
+                        recon?.recons_completed ?? 0,
+                        bounty?.alive_targets ?? 0,
+                        vuln?.total_vulns ?? 0,
+                        reportStats?.total ?? 0,
+                        reportStats?.submitted ?? 0,
+                        roi?.operations.reports_accepted ?? 0,
+                      ][idx + 1] ?? 0) : 0;
+                      const conversionRate = ((nextVal as number) / Math.max((step.val as number), 1)) * 100;
+                      
+                      return (
+                        <div key={idx} className="flex flex-col items-center group relative">
+                          {/* Conversion rate indicator */}
+                          {idx < 6 && (step.val as number) > 0 && (
+                            <div className={`text-center mb-1 h-5 flex items-center justify-center`}>
+                              <div className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full 
+                                ${conversionRate >= 50 ? 'bg-emerald-500/20 text-emerald-300' :
+                                  conversionRate >= 20 ? 'bg-amber-500/20 text-amber-300' :
+                                  'bg-red-500/20 text-red-300'
+                                }`}>
+                                {Math.round(conversionRate)}%
+                              </div>
+                            </div>
+                          )}
+
+                          {/* Counter above */}
+                          <div className={`text-center mb-2 h-6 flex items-center justify-center transition-all duration-300 
+                            ${isActive 
+                              ? `font-bold text-sm text-${step.colorClass}` 
+                              : 'text-[10px] text-[var(--muted)]'
+                            }`}>
+                            {(step.val as number).toLocaleString()}
+                          </div>
+
+                          {/* Tooltip on hover */}
+                          <div className="absolute -top-16 left-1/2 transform -translate-x-1/2 opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-200 z-20">
+                            <div className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 whitespace-nowrap text-[8px] text-white">
+                              {step.tip}
+                            </div>
+                          </div>
+
+                          {/* Circle node */}
+                          <div className={`relative w-11 h-11 sm:w-13 sm:h-13 rounded-full flex items-center justify-center transition-all duration-300 cursor-pointer group-hover:scale-110
+                            ${isActive
+                              ? `bg-gradient-to-br from-${step.color}-500/40 to-${step.color}-600/20 border-2 border-${step.color}-400/60 shadow-lg shadow-${step.color}-500/30`
+                              : 'bg-white/5 border-2 border-white/15 group-hover:border-white/30'
+                            }`}
+                          >
+                            {/* Inner glow */}
+                            {isActive && (
+                              <div className={`absolute inset-0 rounded-full bg-gradient-to-br from-${step.color}-500/30 to-transparent animate-pulse opacity-50`} />
+                            )}
+                            
+                            {/* Icon */}
+                            <span className={`text-lg relative z-10 transition-transform duration-300 ${isActive ? 'group-hover:scale-125' : 'group-hover:scale-110'}`}>
+                              {step.icon}
+                            </span>
+
+                            {/* Active indicator */}
+                            {isActive && (
+                              <div className="absolute -top-1 -right-1 w-3 h-3 bg-gradient-to-br from-emerald-400 to-green-500 rounded-full border border-emerald-300 shadow-md shadow-emerald-500/50 animate-pulse" />
+                            )}
+                          </div>
+
+                          {/* Label below */}
+                          <div className={`text-center mt-2 text-[9px] font-semibold transition-all duration-300
+                            ${isActive 
+                              ? 'text-[var(--foreground)]' 
+                              : 'text-[var(--muted)] group-hover:text-white/60'
+                            }`}>
+                            {step.label}
+                          </div>
+
+                          {/* Description on hover */}
+                          <div className="absolute top-32 left-1/2 transform -translate-x-1/2 opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-200 z-20 max-w-[90px]">
+                            <div className="bg-slate-900/95 border border-slate-700 rounded-lg px-2 py-1.5 text-center whitespace-normal text-[8px] text-gray-300">
+                              {step.description}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Progress indicator - Enhanced */}
+                <div className="mt-10 pt-6 border-t border-white/10">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
+                      <div className="text-[10px] font-bold text-indigo-300 mb-1">Etapa Atual</div>
+                      <div className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
+                        {(function() {
+                          const vals = [
+                            bounty?.programs ?? 0,
+                            recon?.recons_completed ?? 0,
+                            bounty?.alive_targets ?? 0,
+                            vuln?.total_vulns ?? 0,
+                            reportStats?.total ?? 0,
+                            reportStats?.submitted ?? 0,
+                            roi?.operations.reports_accepted ?? 0,
+                          ];
+                          const idx = vals.findIndex(v => v === 0);
+                          return idx === -1 ? "✓" : idx + 1;
+                        })()}
+                      </div>
+                      <div className="text-[9px] text-[var(--muted)] mt-1">de 7</div>
+                    </div>
+                    
+                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
+                      <div className="text-[10px] font-bold text-emerald-300 mb-1">Progresso</div>
+                      <div className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-emerald-400 to-green-400 bg-clip-text text-transparent">
+                        {Math.round((function() {
+                          const vals = [
+                            bounty?.programs ?? 0,
+                            recon?.recons_completed ?? 0,
+                            bounty?.alive_targets ?? 0,
+                            vuln?.total_vulns ?? 0,
+                            reportStats?.total ?? 0,
+                            reportStats?.submitted ?? 0,
+                            roi?.operations.reports_accepted ?? 0,
+                          ];
+                          return vals.filter(v => v > 0).length / 7 * 100;
+                        })())}%
+                      </div>
+                      <div className="text-[9px] text-[var(--muted)] mt-1">complete</div>
+                    </div>
+
+                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
+                      <div className="text-[10px] font-bold text-violet-300 mb-1">Taxa Conversão</div>
+                      <div className={`text-xl sm:text-2xl font-bold bg-clip-text text-transparent ${
+                        ((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 >= 50 
+                          ? 'bg-gradient-to-r from-green-400 to-emerald-400' 
+                          : (((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 >= 20 
+                            ? 'bg-gradient-to-r from-amber-400 to-yellow-400'
+                            : 'bg-gradient-to-r from-red-400 to-pink-400')
+                      }`}>
+                        {Math.round(((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100)}%
+                      </div>
+                      <div className="text-[9px] text-[var(--muted)] mt-1">Reports → Enviados</div>
+                    </div>
+
+                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
+                      <div className="text-[10px] font-bold text-green-300 mb-1">Aceitação</div>
+                      <div className={`text-xl sm:text-2xl font-bold bg-clip-text text-transparent ${
+                        ((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100 >= 50 
+                          ? 'bg-gradient-to-r from-green-400 to-emerald-400' 
+                          : (((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100 >= 20 
+                            ? 'bg-gradient-to-r from-amber-400 to-yellow-400'
+                            : 'bg-gradient-to-r from-red-400 to-pink-400')
+                      }`}>
+                        {Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100)}%
+                      </div>
+                      <div className="text-[9px] text-[var(--muted)] mt-1">Enviados → Aceitos</div>
+                    </div>
+                  </div>
+
+                  {/* Insights and recommendations */}
+                  <div className="mt-4 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20">
+                    <div className="flex gap-2">
+                      <span className="text-base pt-0.5">💡</span>
+                      <div className="text-[10px] text-blue-200/80">
+                        {(function() {
+                          if ((roi?.operations.reports_accepted ?? 0) === 0) {
+                            return "Comece enviando seus primeiros relatórios. Quanto mais variedade, melhor sua taxa de aceitação.";
+                          } else if (((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 < 50) {
+                            return "Aumentar o fluxo de envios é crucial. Tente elevar a taxa de conversão reports → enviados.";
+                          } else if (((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100 < 30) {
+                            return "A qualidade dos relatórios é importante. Verifique o CVSS de suas descobertas e adicione POCs mais robustos.";
+                          } else {
+                            return "Ótima taxa de aceitação! Continue mantendo a qualidade e escale a quantidade de descobertas.";
+                          }
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Contextual Information & Metrics Card */}
+            <div className="relative px-6 py-6 rounded-xl border border-white/10 bg-gradient-to-br from-slate-500/5 via-slate-400/3 to-slate-500/5 backdrop-blur-md overflow-hidden">
+              {/* Background glow */}
+              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-slate-500/15 blur-3xl pointer-events-none" />
+              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-slate-500/10 blur-3xl pointer-events-none" />
+              
+              <div className="relative z-10">
+                <h3 className="text-sm font-bold text-[var(--foreground)] mb-4 flex items-center gap-2">
+                  <span>📊 Métricas de Desempenho</span>
+                  <span className="text-[10px] font-normal text-[var(--muted)]">Análise detalhada</span>
+                </h3>
+
+                {/* Key metrics grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all">
+                    <div className="text-[10px] font-bold text-slate-300 mb-1">Média por Programa</div>
+                    <div className="text-base sm:text-lg font-bold text-slate-200">
+                      {Math.round((bounty?.alive_targets ?? 0) / Math.max(bounty?.programs ?? 1, 1))}
+                    </div>
+                    <div className="text-[8px] text-slate-400 mt-1">Targets p/ Programa</div>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all">
+                    <div className="text-[10px] font-bold text-slate-300 mb-1">Vuln Taxa</div>
+                    <div className="text-base sm:text-lg font-bold text-amber-300">
+                      {Math.round((vuln?.total_vulns ?? 0) / Math.max(bounty?.alive_targets ?? 1, 1) * 10) / 10}
+                    </div>
+                    <div className="text-[8px] text-slate-400 mt-1">Vulnerabilidades p/ Host</div>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all">
+                    <div className="text-[10px] font-bold text-slate-300 mb-1">Reward Médio</div>
+                    <div className="text-base sm:text-lg font-bold text-green-300">
+                      ${((roi?.summary.total_earnings ?? 0) / Math.max(roi?.operations.reports_accepted ?? 1, 1)).toLocaleString(undefined, {maximumFractionDigits: 0})}
+                    </div>
+                    <div className="text-[8px] text-slate-400 mt-1">Por Aceitação</div>
+                  </div>
+                </div>
+
+                {/* Explanations */}
+                <div className="space-y-2 text-[10px]">
+                  <div className="flex gap-2 p-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
+                    <span className="text-indigo-400 font-bold flex-shrink-0">📋</span>
+                    <span className="text-indigo-200/80">
+                      <strong>Discover:</strong> Cadastre seus programas alvo nas principais plataformas. Use <code className="text-indigo-300">bountyTargets()</code> para explorar novos programas automaticamente.
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2 p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/20">
+                    <span className="text-cyan-400 font-bold flex-shrink-0">🔍</span>
+                    <span className="text-cyan-200/80">
+                      <strong>Recon:</strong> Use subfinder, httpx, e nuclei para mapear infraestrutura. O reconhecimento profundo aumenta as chances de descobrir vulnerabilidades.
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2 p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                    <span className="text-emerald-400 font-bold flex-shrink-0">⚡</span>
+                    <span className="text-emerald-200/80">
+                      <strong>Scan & Report:</strong> Execute scans com Nuclei/Nmap em paralelo. Para cada vulnerabilidade, prepare um relatório com CVSS, POC e steps para reprodução.
+                    </span>
+                  </div>
+
+                  <div className="flex gap-2 p-2 rounded-lg bg-green-500/10 border border-green-500/20">
+                    <span className="text-green-400 font-bold flex-shrink-0">💰</span>
+                    <span className="text-green-200/80">
+                      <strong>Monetize:</strong> Submeta seus relatórios via API. Programas com alta recompensa tendem a ter critérios mais relaxados - comece por eles para ganhar confiança.
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* H1 Auto-Submit Pipeline Status */}
+            <div className="relative px-6 py-6 rounded-xl border border-violet-500/20 bg-gradient-to-br from-violet-500/8 via-[var(--card)] to-blue-500/5 backdrop-blur-md overflow-hidden">
+              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-violet-500/15 blur-3xl pointer-events-none" />
+              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-blue-500/10 blur-3xl pointer-events-none" />
+              
+              <div className="relative z-10">
+                {/* Header */}
+                <div className="flex items-center justify-between mb-5">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-violet-500/25 border border-violet-400/30 flex items-center justify-center text-lg shadow-lg shadow-violet-500/20">📤</div>
+                    <div>
+                      <h3 className="text-sm font-bold text-violet-300 uppercase tracking-widest">Pipeline Auto-Submit → HackerOne</h3>
+                      <p className="text-[10px] text-violet-400/70 mt-0.5">
+                        Ciclo completo: Vulnerabilidades confirmadas → Relatórios formatados → Submissão automática via API HackerOne
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {h1Stats?.auto_submit_config?.enabled ? (
+                      <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-300 text-[10px] font-semibold">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        {h1Stats?.auto_submit_config?.dry_run ? "DRY RUN" : "ATIVO"}
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-red-500/10 border border-red-500/20 text-red-300 text-[10px] font-semibold">
+                        <span className="w-2 h-2 rounded-full bg-red-400" />DESATIVADO
+                      </span>
+                    )}
+                    <button
+                      disabled={h1Submitting}
+                      onClick={async () => {
+                        setH1Submitting(true);
+                        setH1Msg("");
+                        try {
+                          const res = await triggerH1AutoSubmit({ limit: 10 });
+                          setH1Msg(`✅ Ciclo completo: ${res.reports_generated} reports gerados de ${res.processed_vulns} vulns | ${res.submitted} enviados ao H1 | ${res.duplicates} duplicados | ${res.errors} erros`);
+                          const [stats, queue] = await Promise.all([fetchH1Stats(), fetchH1Queue()]);
+                          setH1Stats(stats);
+                          setH1Queue(queue.reports || []);
+                        } catch (e: any) {
+                          setH1Msg(`❌ ${e.message || "Falha na execução do pipeline"}`);
+                        } finally {
+                          setH1Submitting(false);
+                        }
+                      }}
+                      className="px-3 py-1.5 text-[10px] font-bold rounded-lg bg-violet-500/20 border border-violet-500/30 text-violet-300 hover:bg-violet-500/30 hover:border-violet-500/50 transition-all disabled:opacity-50"
+                    >
+                      {h1Submitting ? "⏳ Processando..." : "▶ Executar Agora"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Result message */}
+                {h1Msg && (
+                  <div className={`mb-4 p-3 rounded-lg border text-[10px] flex items-start gap-2 ${
+                    h1Msg.startsWith("✅") ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-200/90"
+                    : h1Msg.startsWith("❌") ? "bg-red-500/10 border-red-500/20 text-red-200/90"
+                    : "bg-blue-500/10 border-blue-500/20 text-blue-200/90"
+                  }`}>
+                    <span className="flex-shrink-0 mt-0.5">{h1Msg.startsWith("✅") ? "✅" : h1Msg.startsWith("❌") ? "❌" : "ℹ️"}</span>
+                    <span>{h1Msg.replace(/^[✅❌] /, "")}</span>
+                  </div>
+                )}
+
+                {/* Pipeline visual flow */}
+                <div className="mb-5 p-4 rounded-lg bg-white/3 border border-white/8">
+                  <div className="text-[10px] font-bold text-[var(--muted)] uppercase mb-3">Como funciona o pipeline</div>
+                  <div className="flex items-center justify-between gap-1">
+                    {[
+                      { icon: "🔍", label: "Scan", desc: "Nuclei detecta vulns", active: (vuln?.total_vulns ?? 0) > 0 },
+                      { icon: "→", label: "", desc: "", arrow: true },
+                      { icon: "📝", label: "Report", desc: "Gera relatório H1", active: (reportStats?.total ?? 0) > 0 },
+                      { icon: "→", label: "", desc: "", arrow: true },
+                      { icon: "✅", label: "Valida", desc: "CVSS + PoC + Scope", active: h1Queue.length > 0 || (reportStats?.submitted ?? 0) > 0 },
+                      { icon: "→", label: "", desc: "", arrow: true },
+                      { icon: "📤", label: "Submit", desc: "API HackerOne", active: (h1Stats?.successful ?? 0) > 0 },
+                      { icon: "→", label: "", desc: "", arrow: true },
+                      { icon: "💰", label: "Bounty", desc: "Recompensa", active: (roi?.summary.total_earnings ?? 0) > 0 },
+                    ].map((s, i) => s.arrow ? (
+                      <div key={i} className="text-white/20 text-xs flex-shrink-0">→</div>
+                    ) : (
+                      <div key={i} className={`flex flex-col items-center text-center flex-1 p-2 rounded-lg transition-all ${s.active ? "bg-violet-500/10 border border-violet-500/20" : "opacity-40"}`}>
+                        <span className="text-base mb-1">{s.icon}</span>
+                        <span className={`text-[9px] font-bold ${s.active ? "text-violet-300" : "text-[var(--muted)]"}`}>{s.label}</span>
+                        <span className="text-[8px] text-[var(--muted)] mt-0.5">{s.desc}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Status grid */}
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 text-center group hover:bg-white/8 transition-all">
+                    <div className="text-[10px] font-bold text-violet-300 mb-1">Credenciais H1</div>
+                    <div className={`text-xl font-bold ${h1Stats?.h1_credentials_configured ? "text-emerald-400" : "text-red-400"}`}>
+                      {h1Stats?.h1_credentials_configured ? "✓" : "✗"}
+                    </div>
+                    <div className="text-[8px] text-[var(--muted)] mt-1">
+                      {h1Stats?.h1_credentials_configured ? "Token + Username OK" : "HACKERONE_API_TOKEN ausente"}
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 text-center group hover:bg-white/8 transition-all">
+                    <div className="text-[10px] font-bold text-blue-300 mb-1">Na Fila</div>
+                    <div className="text-xl font-bold text-blue-400">{h1Queue.length}</div>
+                    <div className="text-[8px] text-[var(--muted)] mt-1">Reports draft aguardando envio</div>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 text-center group hover:bg-white/8 transition-all">
+                    <div className="text-[10px] font-bold text-emerald-300 mb-1">Enviados</div>
+                    <div className="text-xl font-bold text-emerald-400">{h1Stats?.successful ?? 0}</div>
+                    <div className="text-[8px] text-[var(--muted)] mt-1">Submetidos com sucesso ao H1</div>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 text-center group hover:bg-white/8 transition-all">
+                    <div className="text-[10px] font-bold text-red-300 mb-1">Falharam</div>
+                    <div className="text-xl font-bold text-red-400">{h1Stats?.failed ?? 0}</div>
+                    <div className="text-[8px] text-[var(--muted)] mt-1">HTTP error ou rejeição</div>
+                  </div>
+
+                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 text-center group hover:bg-white/8 transition-all">
+                    <div className="text-[10px] font-bold text-amber-300 mb-1">Total</div>
+                    <div className="text-xl font-bold text-amber-400">{h1Stats?.total_submissions ?? 0}</div>
+                    <div className="text-[8px] text-[var(--muted)] mt-1">Tentativas de submissão</div>
+                  </div>
+                </div>
+
+                {/* Queue preview */}
+                {h1Queue.length > 0 && (
+                  <div className="mb-4 p-3 rounded-lg bg-white/5 border border-white/10">
+                    <div className="text-[10px] font-bold text-[var(--muted)] uppercase mb-2">📋 Próximos na Fila ({h1Queue.length} reports)</div>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto hide-scrollbar">
+                      {h1Queue.slice(0, 8).map(r => (
+                        <div key={r.id} className="flex items-center justify-between text-[10px] p-2 rounded-lg bg-white/3 hover:bg-white/5 transition-colors border border-white/5">
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className={`px-1.5 py-0.5 rounded text-[8px] font-bold flex-shrink-0
+                              ${r.severity === "critical" ? "bg-red-500/20 text-red-300 border border-red-500/20" :
+                                r.severity === "high" ? "bg-orange-500/20 text-orange-300 border border-orange-500/20" :
+                                r.severity === "medium" ? "bg-amber-500/20 text-amber-300 border border-amber-500/20" :
+                                "bg-slate-500/20 text-slate-300 border border-slate-500/20"
+                              }`}>{r.severity}</span>
+                            <span className="text-[var(--foreground)] font-medium truncate">{r.title}</span>
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0 ml-2">
+                            <span className="text-[8px] text-[var(--muted)] bg-white/5 px-1.5 py-0.5 rounded">{r.vulnerability_count} vuln{r.vulnerability_count !== 1 ? "s" : ""}</span>
+                            <span className="text-[var(--muted)] font-mono text-[9px]">{r.ip}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Detailed explanation */}
+                <div className="space-y-2 mb-4">
+                  <div className="text-[10px] font-bold text-[var(--muted)] uppercase">📖 Detalhes do Pipeline</div>
+                  
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="p-2.5 rounded-lg bg-violet-500/5 border border-violet-500/15">
+                      <div className="flex items-start gap-2">
+                        <span className="text-sm flex-shrink-0">1️⃣</span>
+                        <div className="text-[10px]">
+                          <strong className="text-violet-300">Geração de Reports</strong>
+                          <p className="text-violet-200/60 mt-0.5">
+                            Vulnerabilidades com status &quot;confirmed&quot; na collection <code className="text-violet-400/80 bg-violet-500/10 px-1 rounded">vuln_results</code> são 
+                            convertidas em relatórios HackerOne com título, PoC, CVSS, steps to reproduce e impacto. Agrupadas por IP/host.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-blue-500/5 border border-blue-500/15">
+                      <div className="flex items-start gap-2">
+                        <span className="text-sm flex-shrink-0">2️⃣</span>
+                        <div className="text-[10px]">
+                          <strong className="text-blue-300">Validação de Elegibilidade</strong>
+                          <p className="text-blue-200/60 mt-0.5">
+                            Cada report precisa atender critérios: ter evidência (URL, curl, HTTP req/res), 
+                            CVSS válido, steps to reproduce, impacto descrito, remediação, e estar in-scope no programa.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-cyan-500/5 border border-cyan-500/15">
+                      <div className="flex items-start gap-2">
+                        <span className="text-sm flex-shrink-0">3️⃣</span>
+                        <div className="text-[10px]">
+                          <strong className="text-cyan-300">Verificação de Duplicatas</strong>
+                          <p className="text-cyan-200/60 mt-0.5">
+                            Antes de enviar, o sistema consulta a API H1 para verificar se já existe um report 
+                            similar (mesmo IP/título) no programa-alvo, evitando duplicatas e penalizações.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-emerald-500/5 border border-emerald-500/15">
+                      <div className="flex items-start gap-2">
+                        <span className="text-sm flex-shrink-0">4️⃣</span>
+                        <div className="text-[10px]">
+                          <strong className="text-emerald-300">Submissão via API</strong>
+                          <p className="text-emerald-200/60 mt-0.5">
+                            Reports aprovados são enviados via <code className="text-emerald-400/80 bg-emerald-500/10 px-1 rounded">POST /v1/hackers/reports</code> com 
+                            autenticação Basic Auth (username + token). O status é rastreado no MongoDB.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Config info */}
+                <div className="p-3 rounded-lg bg-violet-500/5 border border-violet-500/15">
+                  <div className="text-[10px] font-bold text-violet-300 mb-2">⚙️ Configuração Atual</div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[9px]">
+                    <div>
+                      <span className="text-[var(--muted)]">Intervalo:</span>{" "}
+                      <strong className="text-violet-300">{h1Stats?.auto_submit_config?.interval_seconds ?? 300}s</strong>
+                      <div className="text-[8px] text-[var(--muted)]">Tempo entre cada ciclo</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--muted)]">Batch size:</span>{" "}
+                      <strong className="text-violet-300">{h1Stats?.auto_submit_config?.batch_size ?? 10}</strong>
+                      <div className="text-[8px] text-[var(--muted)]">Reports por ciclo</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--muted)]">Modo:</span>{" "}
+                      <strong className={h1Stats?.auto_submit_config?.dry_run ? "text-amber-300" : "text-emerald-300"}>
+                        {h1Stats?.auto_submit_config?.dry_run ? "Dry Run" : "Produção"}
+                      </strong>
+                      <div className="text-[8px] text-[var(--muted)]">{h1Stats?.auto_submit_config?.dry_run ? "Não envia de verdade" : "Envia para H1"}</div>
+                    </div>
+                    <div>
+                      <span className="text-[var(--muted)]">Auto:</span>{" "}
+                      <strong className={h1Stats?.auto_submit_config?.enabled ? "text-emerald-300" : "text-red-300"}>
+                        {h1Stats?.auto_submit_config?.enabled ? "Ligado" : "Desligado"}
+                      </strong>
+                      <div className="text-[8px] text-[var(--muted)]">H1_AUTO_SUBMIT env var</div>
+                    </div>
+                  </div>
+                  
+                  {/* Setup guide if not configured */}
+                  {!h1Stats?.h1_credentials_configured && (
+                    <div className="mt-3 p-2 rounded bg-amber-500/10 border border-amber-500/20">
+                      <div className="text-[10px] text-amber-200/90 flex items-start gap-2">
+                        <span className="flex-shrink-0">⚠️</span>
+                        <div>
+                          <strong>Como configurar:</strong> Adicione estas variáveis no <code className="bg-amber-500/15 px-1 rounded text-amber-300">docker-compose.yml</code>:
+                          <div className="mt-1.5 p-2 rounded bg-black/30 font-mono text-[9px] text-amber-100/80 space-y-0.5">
+                            <div>HACKERONE_API_TOKEN: &quot;seu-token-api&quot;</div>
+                            <div>HACKERONE_API_USERNAME: &quot;seu-username&quot;</div>
+                            <div>H1_AUTO_SUBMIT: &quot;true&quot;</div>
+                          </div>
+                          <p className="mt-1.5 text-[9px] text-amber-200/60">
+                            Obtenha seu token em: hackerone.com → Settings → API Token. O username é seu handle no H1.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Success Rate Waterfall Chart */}
+            <div className="relative px-6 py-6 rounded-xl border border-white/10 bg-gradient-to-br from-indigo-500/5 via-purple-500/3 to-pink-500/5 backdrop-blur-md overflow-hidden">
+              {/* Background glow */}
+              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-indigo-500/20 blur-3xl pointer-events-none" />
+              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-purple-500/10 blur-3xl pointer-events-none" />
+              
+              <div className="relative z-10">
+                <div className="flex items-center justify-between mb-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-[var(--foreground)] mb-1 flex items-center gap-2">
+                      <span>🎯 Taxa de Conversão</span>
+                      <span className="text-[10px] font-normal text-[var(--muted)]">Funil de progressão</span>
+                    </h3>
+                    <p className="text-[10px] text-[var(--muted)]">
+                      Acompanhe como seus ativos se transformam em receita. Cada percentual mostra quantos recursos avançam para a próxima etapa.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Waterfall visualization */}
+                <div className="space-y-3">
+                  {[
+                    { 
+                      icon: "📋", 
+                      label: "Programas", 
+                      val: bounty?.programs ?? 0, 
+                      max: bounty?.programs ?? 1,
+                      color: "from-indigo-500 to-indigo-600",
+                      glow: "shadow-indigo-500/30",
+                      percent: 100 
+                    },
+                    { 
+                      icon: "🔍", 
+                      label: "Recon Completado", 
+                      val: recon?.recons_completed ?? 0, 
+                      max: bounty?.programs ?? 1,
+                      color: "from-cyan-500 to-cyan-600",
+                      glow: "shadow-cyan-500/30",
+                      percent: ((recon?.recons_completed ?? 0) / Math.max(bounty?.programs ?? 1, 1)) * 100
+                    },
+                    { 
+                      icon: "🎯", 
+                      label: "Targets Vivos", 
+                      val: bounty?.alive_targets ?? 0, 
+                      max: Math.max(bounty?.alive_targets ?? 1, 1),
+                      color: "from-teal-500 to-teal-600",
+                      glow: "shadow-teal-500/30",
+                      percent: ((bounty?.alive_targets ?? 0) / Math.max(recon?.recons_completed ?? 1, 1)) * 100
+                    },
+                    { 
+                      icon: "⚡", 
+                      label: "Vulnerabilidades", 
+                      val: vuln?.total_vulns ?? 0, 
+                      max: Math.max(vuln?.total_vulns ?? 1, 1),
+                      color: "from-amber-500 to-amber-600",
+                      glow: "shadow-amber-500/30",
+                      percent: ((vuln?.total_vulns ?? 0) / Math.max(bounty?.alive_targets ?? 1, 1)) * 100
+                    },
+                    { 
+                      icon: "📝", 
+                      label: "Relatórios", 
+                      val: reportStats?.total ?? 0, 
+                      max: Math.max(reportStats?.total ?? 1, 1),
+                      color: "from-violet-500 to-violet-600",
+                      glow: "shadow-violet-500/30",
+                      percent: ((reportStats?.total ?? 0) / Math.max(vuln?.total_vulns ?? 1, 1)) * 100
+                    },
+                    { 
+                      icon: "📤", 
+                      label: "Enviados", 
+                      val: reportStats?.submitted ?? 0, 
+                      max: Math.max(reportStats?.submitted ?? 1, 1),
+                      color: "from-blue-500 to-blue-600",
+                      glow: "shadow-blue-500/30",
+                      percent: ((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100
+                    },
+                    { 
+                      icon: "✅", 
+                      label: "Aceitos", 
+                      val: roi?.operations.reports_accepted ?? 0, 
+                      max: Math.max(roi?.operations.reports_accepted ?? 1, 1),
+                      color: "from-emerald-500 to-emerald-600",
+                      glow: "shadow-emerald-500/30",
+                      percent: ((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100
+                    },
+                  ].map((s, i) => {
+                    const percent = Math.max(0, Math.min(100, s.percent));
+                    return (
+                      <div key={i} className="group">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <div className="flex items-center gap-2 text-[11px]">
+                            <span className="text-base">{s.icon}</span>
+                            <span className="font-semibold text-[var(--foreground)]">{s.label}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-bold tabular-nums text-indigo-300">{s.val.toLocaleString()}</span>
+                            <span className="text-[9px] text-[var(--muted)]">{Math.round(percent)}%</span>
+                          </div>
+                        </div>
+                        
+                        {/* Progress bar with gradient */}
+                        <div className="relative h-6 rounded-lg overflow-hidden bg-white/5 border border-white/10 group-hover:border-white/20 transition-all duration-300">
+                          {/* Gradient fill */}
+                          <div 
+                            className={`absolute inset-y-0 left-0 rounded-lg bg-gradient-to-r ${s.color} transition-all duration-500 group-hover:shadow-lg ${s.glow}`}
+                            style={{ width: `${Math.max(5, percent)}%` }}
+                          />
+                          
+                          {/* Shimmer effect */}
+                          <div 
+                            className="absolute inset-y-0 left-0 rounded-lg bg-gradient-to-r from-white/30 via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+                            style={{ 
+                              width: `${Math.max(5, percent)}%`,
+                              animation: 'shimmer 2s infinite'
+                            }}
+                          />
+
+                          {/* Value label */}
+                          {percent > 15 && (
+                            <div className="absolute inset-0 flex items-center px-2 text-[10px] font-bold text-white/80">
+                              {Math.round(percent)}%
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Summary metrics */}
+                <div className="grid grid-cols-3 gap-2 mt-6 pt-4 border-t border-white/10">
+                  <div className="text-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                    <div className="text-[9px] text-[var(--muted)] uppercase font-semibold mb-1">Conversão Total</div>
+                    <div className="text-lg font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
+                      {Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(bounty?.programs ?? 1, 1)) * 100)}%
+                    </div>
+                  </div>
+                  <div className="text-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                    <div className="text-[9px] text-[var(--muted)] uppercase font-semibold mb-1">Taxa de Aceitação</div>
+                    <div className="text-lg font-bold bg-gradient-to-r from-violet-400 to-pink-400 bg-clip-text text-transparent">
+                      {Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100)}%
+                    </div>
+                  </div>
+                  <div className="text-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                    <div className="text-[9px] text-[var(--muted)] uppercase font-semibold mb-1">Média por Aceito</div>
+                    <div className="text-lg font-bold bg-gradient-to-r from-green-400 to-lime-400 bg-clip-text text-transparent">
+                      ${roi?.operations.reports_accepted ? (roi.summary.total_earnings / roi.operations.reports_accepted).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '0'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <style jsx>{`
+              @keyframes shimmer {
+                0% { transform: translateX(-100%); }
+                100% { transform: translateX(100%); }
+              }
+            `}</style>
           </div>
 
-          {/* ══════════ ROW 2: Vulns + Recon + Report Submit ══════════ */}
+          {/* ══════════ ROW 2: Recon + Live Terminal + Report Submit ══════════ */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-stretch">
-
-            {/* Vulnerabilities Breakdown */}
-            <Tooltip className="lg:col-span-4" text={"Painel de vulnerabilidades por severidade.\nMostra total, breakdown CRIT/HIGH/MED/LOW,\ntop vulns encontradas e status do Nuclei/Nmap.\nBlind vulns são confirmadas via Interactsh."}>
-            <Card title="Vulnerabilities" accent="text-amber-400" glow="rgba(245, 158, 11, 0.06)">
-              <div className="flex items-center gap-3 mb-3">
-                <Donut value={(sev?.critical ?? 0) + (sev?.high ?? 0)} total={vuln?.total_vulns ?? 1} color="#f97316" size={56} />
-                <div>
-                  <div className="text-2xl font-bold tabular-nums text-[var(--foreground)]">{vuln?.total_vulns ?? 0}</div>
-                  <div className="text-[10px] text-[var(--muted)] uppercase">Total vulns</div>
-                </div>
-              </div>
-              <SevBar c={sev?.critical ?? 0} h={sev?.high ?? 0} m={sev?.medium ?? 0} l={sev?.low ?? 0} i={sev?.info ?? 0} />
-              <div className="grid grid-cols-5 gap-1 mt-2.5">
-                {[
-                  { label: "CRIT", val: sev?.critical ?? 0, c: "text-red-400" },
-                  { label: "HIGH", val: sev?.high ?? 0, c: "text-orange-400" },
-                  { label: "MED", val: sev?.medium ?? 0, c: "text-amber-400" },
-                  { label: "LOW", val: sev?.low ?? 0, c: "text-sky-400" },
-                  { label: "INFO", val: sev?.info ?? 0, c: "text-slate-500" },
-                ].map(s => (
-                  <div key={s.label} className="text-center">
-                    <div className={`text-sm font-bold tabular-nums ${s.val > 0 ? s.c : "text-[var(--muted)]"}`}>{s.val}</div>
-                    <div className="text-[8px] text-[var(--muted)] uppercase">{s.label}</div>
-                  </div>
-                ))}
-              </div>
-              {/* Top Vulns */}
-              {vuln?.top_vulns && vuln.top_vulns.length > 0 && (
-                <div className="mt-2.5 pt-2 border-t border-[var(--border)]">
-                  <div className="text-[10px] text-[var(--muted)] uppercase font-semibold mb-1">Top Vulnerabilities</div>
-                  {vuln.top_vulns.slice(0, 4).map((tv, i) => (
-                    <div key={i} className="flex items-center justify-between text-[10px] py-0.5">
-                      <span className="text-[var(--foreground)] truncate flex-1">{tv.name || tv.template_id}</span>
-                      <span className={`font-bold ml-2 shrink-0 px-1.5 py-0.5 rounded text-[9px] sev-${tv.severity}`}>{tv.count}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-              <div className="mt-2 pt-2 border-t border-[var(--border)] grid grid-cols-2 gap-1 text-xs">
-                <div className="text-[var(--muted)]">Nuclei <span className="text-[var(--foreground)] font-semibold">{scanner?.nuclei_runs ?? 0}</span></div>
-                <div className="text-[var(--muted)]">Nmap <span className="text-[var(--foreground)] font-semibold">{scanner?.nmap_runs ?? 0}</span></div>
-                <div className="text-[var(--muted)]">Queue <span className="text-amber-400 font-semibold">{scanner?.queue_size ?? 0}</span></div>
-                <div className="text-[var(--muted)]">Scanning <span className="text-blue-400 font-semibold">{scanner?.scanning ?? 0}</span></div>
-              </div>
-              {blindVulns.length > 0 && (
-                <div className="mt-2 pt-2 border-t border-[var(--border)]">
-                  <div className="text-[10px] text-purple-400 font-semibold uppercase mb-1">Blind Vulns Confirmed</div>
-                  <div className="text-lg font-bold text-purple-400">{blindVulns.length}</div>
-                </div>
-              )}
-            </Card>
-            </Tooltip>
 
             {/* Recon Pipeline */}
             <Tooltip className="lg:col-span-4" text={"Pipeline de reconhecimento automático.\nRoda subfinder, crt.sh, httpx, dnsx, rDNS.\nDescobre subdomínios e verifica quais estão vivos.\nNovos targets são priorizados para scan."}>
-            <Card title="Recon Pipeline" accent="text-cyan-400" glow="rgba(6, 182, 212, 0.06)">
+            <Card title="Recon Pipeline" accent="text-cyan-400" glow="rgba(6, 182, 212, 0.06)" onClick={() => setActiveModal('recon')} clickHint="ver recon">
               <div className="flex items-center gap-3 mb-3">
                 <Donut value={recon?.recons_completed ?? 0} total={bounty?.programs ?? 1} color="#06b6d4" size={56} />
                 <div>
@@ -586,7 +1423,17 @@ export default function Home() {
                     {recon?.recons_completed ?? 0}<span className="text-[var(--muted)]">/{bounty?.programs ?? 0}</span>
                   </div>
                   <div className="text-[10px] text-[var(--muted)] uppercase">Recons done</div>
+                  <div className="text-[9px] text-cyan-400/70 mt-0.5">
+                    {Math.round((recon?.recons_completed ?? 0) / Math.max(bounty?.programs ?? 1, 1) * 100)}% cobertura
+                  </div>
                 </div>
+              </div>
+              {/* Quick Insight */}
+              <div className="mb-2 p-1.5 rounded-lg bg-cyan-500/5 border border-cyan-500/10 text-[9px] text-cyan-300/70 flex items-center gap-1.5">
+                <span>💡</span>
+                {(recon?.new_subdomains_detected ?? 0) > 0 
+                  ? <span>{recon!.new_subdomains_detected} novos subdomínios detectados!</span>
+                  : <span>subfinder + crt.sh + httpx + rDNS</span>}
               </div>
               <div className="space-y-1.5">
                 {[
@@ -606,11 +1453,85 @@ export default function Home() {
                   </div>
                 ))}
               </div>
+              {/* Survival rate bar */}
+              <div className="mt-2 pt-2 border-t border-[var(--border)]">
+                <div className="flex items-center justify-between text-[9px] mb-1">
+                  <span className="text-[var(--muted)]">Taxa de sobrevivência</span>
+                  <span className="text-emerald-400 font-bold">{Math.round(((bounty?.alive_targets ?? 0) / Math.max(bounty?.targets ?? 1, 1)) * 100)}%</span>
+                </div>
+                <div className="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                  <div className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-emerald-500 transition-all" style={{ width: `${Math.round(((bounty?.alive_targets ?? 0) / Math.max(bounty?.targets ?? 1, 1)) * 100)}%` }} />
+                </div>
+              </div>
               {(recon?.errors ?? 0) > 0 && (
                 <div className="mt-2 text-xs text-red-400">Errors: {recon!.errors}</div>
               )}
             </Card>
             </Tooltip>
+
+            {/* ── Live Activity Terminal ── */}
+            <div className="lg:col-span-4 flex flex-col">
+              <div className="rounded-xl border border-emerald-500/20 bg-[#0a0e14] flex flex-col h-full overflow-hidden">
+                {/* title bar */}
+                <div className="flex items-center justify-between px-3 py-2 border-b border-emerald-500/15 bg-[#0d1117]">
+                  <div className="flex items-center gap-2">
+                    <span className="flex gap-1">
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
+                    </span>
+                    <span className="text-[10px] font-mono text-emerald-400/70 uppercase tracking-widest">Live API Activity</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className={`w-1.5 h-1.5 rounded-full ${logsPaused ? "bg-yellow-400" : "bg-emerald-400 animate-pulse"}`} />
+                    <button
+                      onClick={() => setLogsPaused(p => !p)}
+                      className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-emerald-500/20 text-emerald-400/60 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors"
+                    >
+                      {logsPaused ? "▶ resume" : "⏸ pause"}
+                    </button>
+                  </div>
+                </div>
+                {/* log area */}
+                <div ref={termRef} className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[10px] leading-[1.6] min-h-[200px] max-h-[340px] scrollbar-thin scrollbar-thumb-emerald-500/20 scrollbar-track-transparent">
+                  {activityLogs.length === 0 ? (
+                    <div className="flex items-center justify-center h-full text-emerald-500/30 text-xs">
+                      <span className="animate-pulse">aguardando eventos...</span>
+                    </div>
+                  ) : (
+                    activityLogs.map((log, i) => {
+                      const lvl = log.level?.toUpperCase() ?? "INFO";
+                      const color =
+                        lvl === "ERROR" ? "text-red-400" :
+                        lvl === "WARNING" ? "text-amber-400" :
+                        lvl === "DEBUG" ? "text-slate-500" :
+                        "text-emerald-400/80";
+                      const tagColor =
+                        (log.tag ?? "").includes("VULN") ? "text-red-400 bg-red-500/10" :
+                        (log.tag ?? "").includes("SCAN") ? "text-cyan-400 bg-cyan-500/10" :
+                        (log.tag ?? "").includes("RECON") ? "text-blue-400 bg-blue-500/10" :
+                        (log.tag ?? "").includes("REPORT") ? "text-violet-400 bg-violet-500/10" :
+                        (log.tag ?? "").includes("CVE") ? "text-orange-400 bg-orange-500/10" :
+                        "text-slate-400 bg-slate-500/10";
+                      const time = log.ts ? new Date(log.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+                      return (
+                        <div key={`${log.ts}-${i}`} className="flex gap-1.5 hover:bg-white/[0.02] rounded px-1 -mx-1">
+                          <span className="text-slate-600 shrink-0 select-none">{time}</span>
+                          <span className={`font-bold shrink-0 w-[42px] text-right ${color}`}>{lvl.slice(0, 4)}</span>
+                          {log.tag && <span className={`shrink-0 px-1 rounded text-[9px] font-semibold ${tagColor}`}>{log.tag}</span>}
+                          <span className="text-slate-300/90 break-all">{log.msg}</span>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                {/* status bar */}
+                <div className="px-3 py-1 border-t border-emerald-500/10 bg-[#0d1117] flex items-center justify-between">
+                  <span className="text-[9px] font-mono text-slate-600">{activityLogs.length} eventos</span>
+                  <span className="text-[9px] font-mono text-emerald-500/40">polling 3s</span>
+                </div>
+              </div>
+            </div>
 
             {/* Report Submission (expandable) */}
             <ReportSubmissionCard
@@ -623,29 +1544,39 @@ export default function Home() {
           {/* ══════════ ROW 3: AI Analyzer ══════════ */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
             <Tooltip className="lg:col-span-12" text={"Modelo de IA local (Ollama) para:\n• Gerar reports profissionais\n• Classificar true/false positives\n• Analisar HTTP responses\n• Encontrar vulnerability chains"}>
-            <Card title="AI Analyzer" accent="text-fuchsia-400" glow="rgba(192, 38, 211, 0.06)">
+            <Card title="AI Analyzer" accent="text-fuchsia-400" glow="rgba(192, 38, 211, 0.06)" onClick={() => setActiveModal('ai')} clickHint="ver AI">
               {aiStats ? (
-                <div className="flex items-center gap-6 flex-wrap">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-2 h-2 rounded-full ${aiStats.enabled ? "bg-emerald-400 pulse-live" : "bg-red-400"}`} />
-                    <span className={`text-xs font-medium ${aiStats.enabled ? "text-emerald-400" : "text-red-400"}`}>
-                      {aiStats.enabled ? "Active" : "Disabled"}
-                    </span>
-                    {aiStats.model && (
-                      <span className="text-[10px] text-[var(--muted)] bg-white/5 px-1.5 py-0.5 rounded font-mono">{aiStats.model}</span>
-                    )}
+                <div className="space-y-2">
+                  <div className="flex items-center gap-6 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${aiStats.enabled ? "bg-emerald-400 pulse-live" : "bg-red-400"}`} />
+                      <span className={`text-xs font-medium ${aiStats.enabled ? "text-emerald-400" : "text-red-400"}`}>
+                        {aiStats.enabled ? "Active" : "Disabled"}
+                      </span>
+                      {aiStats.model && (
+                        <span className="text-[10px] text-[var(--muted)] bg-white/5 px-1.5 py-0.5 rounded font-mono">{aiStats.model}</span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-4 text-xs">
+                      <span className="text-[var(--muted)]">Reports <span className="text-fuchsia-400 font-bold">{aiStats.reports_generated}</span></span>
+                      <span className="text-[var(--muted)]">Classified <span className="text-violet-400 font-bold">{aiStats.findings_classified}</span></span>
+                      <span className="text-[var(--muted)]">Analyzed <span className="text-cyan-400 font-bold">{aiStats.responses_analyzed}</span></span>
+                      <span className="text-[var(--muted)]">Requests <span className="text-[var(--foreground)] font-bold">{aiStats.requests}</span></span>
+                      {aiStats.tokens_used > 0 && <span className="text-[var(--muted)]">Tokens <span className="text-amber-400 font-bold">{aiStats.tokens_used.toLocaleString()}</span></span>}
+                      {aiStats.errors > 0 && <span className="text-[var(--muted)]">Errors <span className="text-red-400 font-bold">{aiStats.errors}</span></span>}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-4 text-xs">
-                    <span className="text-[var(--muted)]">Reports <span className="text-fuchsia-400 font-bold">{aiStats.reports_generated}</span></span>
-                    <span className="text-[var(--muted)]">Classified <span className="text-violet-400 font-bold">{aiStats.findings_classified}</span></span>
-                    <span className="text-[var(--muted)]">Analyzed <span className="text-cyan-400 font-bold">{aiStats.responses_analyzed}</span></span>
-                    <span className="text-[var(--muted)]">Requests <span className="text-[var(--foreground)] font-bold">{aiStats.requests}</span></span>
-                    {aiStats.tokens_used > 0 && <span className="text-[var(--muted)]">Tokens <span className="text-amber-400 font-bold">{aiStats.tokens_used.toLocaleString()}</span></span>}
-                    {aiStats.errors > 0 && <span className="text-[var(--muted)]">Errors <span className="text-red-400 font-bold">{aiStats.errors}</span></span>}
+                  {/* AI summary bar */}
+                  <div className="flex items-center gap-2 text-[9px] text-fuchsia-300/60 pt-1 border-t border-[var(--border)]">
+                    <span>🧠</span>
+                    <span>Gera reports • Classifica findings • Analisa responses • CVSS automático</span>
+                    {aiStats.errors > 0 && (
+                      <span className="ml-auto text-red-400/70">Taxa de erro: {Math.round(aiStats.errors / Math.max(aiStats.requests, 1) * 100)}%</span>
+                    )}
                   </div>
                 </div>
               ) : (
-                <div className="text-xs text-[var(--muted)]">Configure AI_PROVIDER in .env</div>
+                <div className="text-xs text-[var(--muted)]">Configure AI_PROVIDER in .env — Habilita geração automática de reports e classificação de vulns.</div>
               )}
             </Card>
             </Tooltip>
@@ -655,7 +1586,7 @@ export default function Home() {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-stretch">
 
           <Tooltip className="lg:col-span-8" text={"Programas e status do recon.\nClique Recon para disparar manualmente.\nO auto-recon roda a cada 4 horas.\nVerde = com targets, azul = rodando."}>
-          <Card title="Recon Live" accent="text-cyan-400"
+          <Card title="Recon Live" accent="text-cyan-400" onClick={() => setActiveModal('recon-live')} clickHint="ver todos"
             action={
               <div className="flex items-center gap-2">
                 {allPrograms.filter(p => p.status === "reconning").length > 0 && (
@@ -689,7 +1620,8 @@ export default function Home() {
                         {hasVulns && <span className="text-red-400">{p.vuln_count}v</span>}
                       </div>
                       <button
-                        onClick={async () => {
+                        onClick={async (e) => {
+                          e.stopPropagation();
                           if (isRunning) return;
                           setReconTriggering(prev => new Set(prev).add(p.id));
                           try { await triggerBountyRecon(p.id); } catch {}
@@ -716,8 +1648,8 @@ export default function Home() {
 
           {/* Quick Actions */}
           <Tooltip className="lg:col-span-4" text={"Ações rápidas para o scanner.\nDescobrir programas, importar,\nscorear, verificar CT/CVE.\nRegistrar bounty recebido."}>
-          <Card title="Quick Actions" accent="text-blue-400" glow="rgba(59, 130, 246, 0.06)">
-            <div className="space-y-1">
+          <Card title="Quick Actions" accent="text-blue-400" glow="rgba(59, 130, 246, 0.06)" onClick={() => setActiveModal('actions')} clickHint="ver ações">
+            <div className="space-y-1" onClick={e => e.stopPropagation()}>
               {[
                 { label: "🔍 Discover H1 Programs", fn: async () => { const r = await discoverH1Programs(); setActionMsg(`Found ${r.new_programs_found}, imported ${r.auto_imported}`); } },
                 { label: "📊 Score Programs", fn: async () => { const r = await scoreAllPrograms(); setActionMsg(`Scored ${r.scored} programs`); } },
@@ -742,7 +1674,7 @@ export default function Home() {
             {actionMsg && <div className="text-[10px] text-emerald-400 px-2 py-1.5 mt-1 bg-emerald-500/5 rounded-lg">{actionMsg}</div>}
 
             {/* Record Earning */}
-            <div className="border-t border-[var(--border)] pt-2 mt-2">
+            <div className="border-t border-[var(--border)] pt-2 mt-2" onClick={e => e.stopPropagation()}>
               <div className="text-[10px] text-[var(--muted)] uppercase font-semibold mb-1.5">Record Earning</div>
               <div className="flex gap-1">
                 <input type="text" id="earn-prog" placeholder="Program"
@@ -770,9 +1702,19 @@ export default function Home() {
 
             {/* Program Rankings */}
             <Tooltip className="lg:col-span-4" text={"Programas rankeados por atratividade.\nTier S/A = melhores oportunidades.\nScore considera: bounty, escopo,\ncompetição e targets ativos.\nUse 'Score Programs' para atualizar."}>
-            <Card title="Program Rankings" accent="text-[var(--accent-light)]"
+            <Card title="Program Rankings" accent="text-[var(--accent-light)]" onClick={() => setActiveModal('rankings')} clickHint="ver ranking"
               action={<span className="text-[10px] text-[var(--muted)]">{programs.length}</span>}
               glow="rgba(99, 102, 241, 0.06)">
+              {/* Tier distribution mini */}
+              {programs.length > 0 && (
+                <div className="flex items-center gap-1 mb-2">
+                  {["S", "A", "B", "C", "D"].map(tier => {
+                    const count = programs.filter(p => p.tier === tier).length;
+                    if (count === 0) return null;
+                    return <span key={tier} className={`text-[8px] font-bold px-1.5 py-0.5 rounded border ${TIER_COLORS[tier] || "bg-slate-700 text-slate-300 border-slate-600"}`}>{tier}:{count}</span>;
+                  })}
+                </div>
+              )}
               <div className="space-y-1 max-h-64 overflow-y-auto hide-scrollbar">
                 {programs.slice(0, 15).map((p, i) => (
                   <div key={p.program_id} className="flex items-center gap-2 py-1 px-1 rounded-lg hover:bg-white/[0.02] transition-colors">
@@ -794,12 +1736,29 @@ export default function Home() {
                 ))}
                 {programs.length === 0 && <div className="text-xs text-[var(--muted)] text-center py-4">No programs scored yet</div>}
               </div>
+              {/* Best program highlight */}
+              {programs.length > 0 && programs[0].has_bounty && (
+                <div className="mt-2 pt-2 border-t border-[var(--border)] text-[9px] text-[var(--muted)] flex items-center gap-1.5">
+                  <span>🏆</span>
+                  <span>Melhor: <strong className="text-[var(--foreground)]">{programs[0].name}</strong> — Score {programs[0].score}{programs[0].bounty_max ? ` • $${programs[0].bounty_max.toLocaleString()}` : ""}</span>
+                </div>
+              )}
             </Card>
             </Tooltip>
 
             {/* Recent Activity */}
             <Tooltip className="lg:col-span-4" text={"Mudanças de subdomínios detectadas.\n+N = novos subdomínios encontrados.\n-N = subdomínios que sumiram.\nSubdomínios novos são priorizados."}>
-            <Card title="Recent Activity" accent="text-lime-400">
+            <Card title="Recent Activity" accent="text-lime-400" onClick={() => setActiveModal('activity')} clickHint="ver atividade">
+              {/* Summary badges */}
+              {changes.length > 0 && (
+                <div className="flex items-center gap-2 mb-2 text-[9px]">
+                  <span className="px-1.5 py-0.5 rounded bg-lime-500/10 text-lime-400 font-bold">{changes.length} mudanças</span>
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-bold">+{changes.reduce((a, c) => a + (c.new_subdomains?.length ?? 0), 0)} novos</span>
+                  {changes.reduce((a, c) => a + (c.removed_subdomains?.length ?? 0), 0) > 0 && (
+                    <span className="px-1.5 py-0.5 rounded bg-red-500/10 text-red-400 font-bold">-{changes.reduce((a, c) => a + (c.removed_subdomains?.length ?? 0), 0)}</span>
+                  )}
+                </div>
+              )}
               <div className="space-y-1.5 max-h-64 overflow-y-auto hide-scrollbar">
                 {changes.map((ch, i) => (
                   <div key={ch.id || i} className="text-xs border-l-2 border-lime-500/30 pl-2 py-0.5">
@@ -824,7 +1783,14 @@ export default function Home() {
 
             {/* Intelligence */}
             <Tooltip className="lg:col-span-4" text={"Inteligência de ROI e mercado.\n• Earnings Trend: ganhos mensais.\n• Top Earners: programas mais lucrativos.\n• Best Vuln Types: tipos que pagam mais.\n• CVEs recentes para explorar."}>
-            <Card title="Intelligence" accent="text-teal-400" glow="rgba(20, 184, 166, 0.06)">
+            <Card title="Intelligence" accent="text-teal-400" glow="rgba(20, 184, 166, 0.06)" onClick={() => setActiveModal('intelligence')} clickHint="ver ROI">
+              {/* Earnings headline */}
+              {roi && (roi.summary.total_earnings > 0 || roi.top_programs.length > 0) && (
+                <div className="mb-3 p-2 rounded-lg bg-green-500/5 border border-green-500/10 flex items-center justify-between">
+                  <span className="text-[10px] text-[var(--muted)]">Total Earnings</span>
+                  <span className="text-sm font-bold text-green-400">${roi.summary.total_earnings.toLocaleString()}</span>
+                </div>
+              )}
               {/* Monthly Trend */}
               {roi && Object.keys(roi.monthly_trend).length > 0 && (
                 <div className="mb-3">
@@ -886,6 +1852,606 @@ export default function Home() {
             </Card>
             </Tooltip>
           </div>
+
+          {/* ═══ BugHunt Programs 🇧🇷 ═══ */}
+          {bughuntPrograms.length > 0 && (
+            <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] overflow-hidden">
+              <div className="px-4 py-3 border-b border-[var(--border)] flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-base">🇧🇷</span>
+                  <span className="text-xs font-semibold">BugHunt</span>
+                  <span className="text-[10px] text-[var(--muted)]">{bughuntPrograms.length} programas</span>
+                </div>
+                <a href="/bughunt" className="text-[10px] text-[var(--accent-light)] hover:underline">Ver dashboard →</a>
+              </div>
+              <div className="divide-y divide-[var(--border)]">
+                {bughuntPrograms.map(prog => {
+                  const isExp = bughuntExpanded === prog.program_id;
+                  return (
+                    <div key={prog.program_id}>
+                      <button
+                        onClick={() => setBughuntExpanded(isExp ? null : prog.program_id)}
+                        className="w-full flex items-center justify-between px-4 py-2.5 hover:bg-white/[0.02] transition-colors text-left"
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-green-500/10 text-green-400 text-xs font-bold shrink-0">
+                            {prog.name.charAt(0).toUpperCase()}
+                          </div>
+                          <div className="min-w-0">
+                            <div className="text-xs font-medium text-[var(--foreground)] truncate">{prog.name}</div>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <span className="text-[10px] text-cyan-400">{prog.scope.length} alvos</span>
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded font-semibold ${
+                                prog.reward_type === "vdp" || prog.max_bounty === 0
+                                  ? "bg-gray-500/15 text-gray-400"
+                                  : "bg-amber-500/15 text-amber-400"
+                              }`}>{prog.max_bounty > 0 ? `R$ ${prog.max_bounty.toLocaleString("pt-BR")}` : prog.reward_type === "vdp" ? "VDP" : "Bounty"}</span>
+                            </div>
+                          </div>
+                        </div>
+                        <svg className={`w-3.5 h-3.5 text-[var(--muted)] transition-transform shrink-0 ${isExp ? "rotate-180" : ""}`}
+                          fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5" />
+                        </svg>
+                      </button>
+                      {isExp && (
+                        <div className="px-4 pb-3 pt-1 bg-[var(--background)]/30 space-y-2">
+                          {prog.scope.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {prog.scope.map((s, i) => (
+                                <span key={i} className="px-2 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400 border border-cyan-500/15 font-mono">{s}</span>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="text-[10px] text-[var(--muted)]">Sem scope</span>
+                          )}
+                          <a href={prog.url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[10px] text-green-400 hover:underline">
+                            <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H5.25A2.25 2.25 0 003 8.25v10.5A2.25 2.25 0 005.25 21h10.5A2.25 2.25 0 0018 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
+                            </svg>
+                            Abrir na BugHunt
+                          </a>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ═══════════════════════════════════════════════════════════════
+             DETAIL MODALS — One per card section
+             ═══════════════════════════════════════════════════════════════ */}
+
+          {/* ── Recon Pipeline Modal ── */}
+          <Modal open={activeModal === 'recon'} onClose={() => setActiveModal(null)} title="🔍 Recon Pipeline — Detalhes" maxWidth="max-w-3xl">
+            <div className="space-y-6">
+              {/* Summary Cards */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {[
+                  { label: "Recons Completos", val: recon?.recons_completed ?? 0, total: bounty?.programs ?? 0, c: "text-cyan-400", bg: "bg-cyan-500/10 border-cyan-500/20", desc: "Programas com reconhecimento finalizado" },
+                  { label: "Subdomínios", val: recon?.subdomains_found ?? 0, c: "text-blue-400", bg: "bg-blue-500/10 border-blue-500/20", desc: "Total de subdomínios descobertos via subfinder + crt.sh + rDNS" },
+                  { label: "Hosts Vivos", val: recon?.hosts_alive ?? 0, c: "text-emerald-400", bg: "bg-emerald-500/10 border-emerald-500/20", desc: "Hosts que responderam a probe HTTP/HTTPS" },
+                  { label: "Novos Subs", val: recon?.new_subdomains_detected ?? 0, c: "text-lime-400", bg: "bg-lime-500/10 border-lime-500/20", desc: "Subdomínios descobertos na última execução" },
+                ].map(s => (
+                  <div key={s.label} className={`p-3 rounded-xl border ${s.bg} text-center`}>
+                    <div className={`text-2xl font-bold tabular-nums ${s.c}`}>{s.val.toLocaleString()}</div>
+                    <div className="text-[10px] text-[var(--muted)] uppercase mt-1 font-semibold">{s.label}</div>
+                    {s.total !== undefined && s.total > 0 && <div className="text-[9px] text-[var(--muted)] mt-0.5">de {s.total} programas</div>}
+                    <div className="text-[9px] text-[var(--muted)] mt-1 leading-tight">{s.desc}</div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Tool Breakdown */}
+              <div>
+                <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Ferramentas de Reconhecimento</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {[
+                    { icon: "🔍", tool: "subfinder", desc: "Enumeração passiva de subdomínios via DNS, APIs públicas (SecurityTrails, VirusTotal, Shodan, etc.)", val: recon?.subdomains_found ?? 0, unit: "subs" },
+                    { icon: "📜", tool: "crt.sh", desc: "Consulta Certificate Transparency logs para descobrir domínios em certificados SSL/TLS emitidos.", val: recon?.crtsh_subdomains ?? 0, unit: "certs" },
+                    { icon: "🌐", tool: "httpx", desc: "Prova de vida HTTP/HTTPS. Detecta status, título, tecnologias (Wappalyzer), CDN e webserver.", val: recon?.hosts_alive ?? 0, unit: "alive" },
+                    { icon: "🔄", tool: "Reverse DNS", desc: "Resolução reversa de IPs para descobrir domínios adicionais hospedados no mesmo servidor.", val: recon?.rdns_subdomains ?? 0, unit: "rDNS" },
+                    { icon: "🏢", tool: "ASN Discovery", desc: "Identifica Autonomous System Numbers das organizações para mapear toda a infraestrutura IP.", val: recon?.asns_discovered ?? 0, unit: "ASNs" },
+                    { icon: "⚡", tool: "Nuclei", desc: "Scanner de vulnerabilidades baseado em templates YAML. Detecta CVEs, misconfigs, exposures.", val: vuln?.total_vulns ?? 0, unit: "findings" },
+                  ].map(t => (
+                    <div key={t.tool} className="flex items-start gap-3 p-3 rounded-lg bg-white/3 border border-white/8 hover:border-white/15 transition-colors">
+                      <span className="text-base mt-0.5">{t.icon}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-[var(--foreground)]">{t.tool}</span>
+                          <span className="text-xs font-bold text-cyan-400 tabular-nums">{t.val.toLocaleString()} <span className="text-[var(--muted)] font-normal">{t.unit}</span></span>
+                        </div>
+                        <p className="text-[10px] text-[var(--muted)] mt-1 leading-relaxed">{t.desc}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Stats breakdown */}
+              <div>
+                <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Métricas Detalhadas</h4>
+                <div className="space-y-2">
+                  {[
+                    { label: "Programs total", val: bounty?.programs ?? 0, c: "text-indigo-400" },
+                    { label: "Programs com bounty", val: bounty?.programs_with_bounty ?? 0, c: "text-emerald-400" },
+                    { label: "Total targets", val: bounty?.targets ?? 0, c: "text-slate-300" },
+                    { label: "Targets vivos", val: bounty?.alive_targets ?? 0, c: "text-emerald-400" },
+                    { label: "Targets novos", val: bounty?.new_targets ?? 0, c: "text-lime-400" },
+                    { label: "Taxa de sobrevivência", val: `${Math.round((bounty?.alive_targets ?? 0) / Math.max(bounty?.targets ?? 1, 1) * 100)}%`, c: ((bounty?.alive_targets ?? 0) / Math.max(bounty?.targets ?? 1, 1)) > 0.5 ? "text-emerald-400" : "text-amber-400" },
+                    { label: "Mudanças detectadas", val: bounty?.total_changes ?? 0, c: "text-slate-300" },
+                    { label: "Erros no recon", val: recon?.errors ?? 0, c: (recon?.errors ?? 0) > 0 ? "text-red-400" : "text-emerald-400" },
+                  ].map(r => (
+                    <div key={r.label} className="flex items-center justify-between text-xs px-2 py-1.5 rounded-lg hover:bg-white/3">
+                      <span className="text-[var(--muted)]">{r.label}</span>
+                      <span className={`font-bold tabular-nums ${r.c}`}>{typeof r.val === 'number' ? r.val.toLocaleString() : r.val}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Tips */}
+              <div className="p-3 rounded-lg bg-cyan-500/5 border border-cyan-500/15">
+                <div className="text-[10px] font-bold text-cyan-300 mb-2">💡 Dicas para Melhorar o Recon</div>
+                <ul className="text-[10px] text-cyan-200/70 space-y-1.5 list-disc pl-4">
+                  <li>Execute recon em horários alternados para detectar infraestrutura efêmera (staging, dev)</li>
+                  <li>Monitore crt.sh regularmente — novos certificados indicam novos serviços sendo deployados</li>
+                  <li>Subdomínios novos têm maior chance de ter vulnerabilidades (menos hardening)</li>
+                  <li>Combine subfinder + Amass para máxima cobertura de enumeração passiva</li>
+                  <li>ASN discovery pode revelar ranges de IP inteiros que são in-scope</li>
+                </ul>
+              </div>
+            </div>
+          </Modal>
+
+          {/* ── AI Analyzer Modal ── */}
+          <Modal open={activeModal === 'ai'} onClose={() => setActiveModal(null)} title="🧠 AI Analyzer — Detalhes" maxWidth="max-w-3xl">
+            <div className="space-y-6">
+              {aiStats ? (
+                <>
+                  {/* Status & Model */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-3 rounded-xl border bg-fuchsia-500/10 border-fuchsia-500/20 text-center">
+                      <div className={`text-2xl font-bold ${aiStats.enabled ? "text-emerald-400" : "text-red-400"}`}>{aiStats.enabled ? "ON" : "OFF"}</div>
+                      <div className="text-[10px] text-[var(--muted)] uppercase mt-1">Status</div>
+                    </div>
+                    <div className="p-3 rounded-xl border bg-violet-500/10 border-violet-500/20 text-center">
+                      <div className="text-lg font-bold text-violet-400 truncate">{aiStats.model || "N/A"}</div>
+                      <div className="text-[10px] text-[var(--muted)] uppercase mt-1">Modelo</div>
+                    </div>
+                    <div className="p-3 rounded-xl border bg-cyan-500/10 border-cyan-500/20 text-center">
+                      <div className="text-2xl font-bold text-cyan-400 tabular-nums">{aiStats.requests}</div>
+                      <div className="text-[10px] text-[var(--muted)] uppercase mt-1">Requests</div>
+                    </div>
+                    <div className="p-3 rounded-xl border bg-amber-500/10 border-amber-500/20 text-center">
+                      <div className="text-2xl font-bold text-amber-400 tabular-nums">{aiStats.tokens_used.toLocaleString()}</div>
+                      <div className="text-[10px] text-[var(--muted)] uppercase mt-1">Tokens</div>
+                    </div>
+                  </div>
+
+                  {/* Operations */}
+                  <div>
+                    <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Operações da AI</h4>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      {[
+                        { icon: "📝", label: "Reports Gerados", val: aiStats.reports_generated, desc: "Relatórios profissionais criados automaticamente com título, CVSS, PoC, steps to reproduce e impacto.", c: "text-fuchsia-400", bg: "bg-fuchsia-500/10 border-fuchsia-500/20" },
+                        { icon: "🔬", label: "Findings Classificados", val: aiStats.findings_classified, desc: "Vulnerabilidades analisadas para determinar true positive vs false positive com confiança.", c: "text-violet-400", bg: "bg-violet-500/10 border-violet-500/20" },
+                        { icon: "📡", label: "Responses Analisadas", val: aiStats.responses_analyzed, desc: "Respostas HTTP analisadas para detectar padrões de vulnerabilidade e informações sensíveis.", c: "text-cyan-400", bg: "bg-cyan-500/10 border-cyan-500/20" },
+                      ].map(op => (
+                        <div key={op.label} className={`p-4 rounded-xl border ${op.bg}`}>
+                          <div className="flex items-center gap-2 mb-2">
+                            <span className="text-lg">{op.icon}</span>
+                            <span className="text-xs font-bold text-[var(--foreground)]">{op.label}</span>
+                          </div>
+                          <div className={`text-3xl font-bold tabular-nums ${op.c} mb-2`}>{op.val}</div>
+                          <p className="text-[10px] text-[var(--muted)] leading-relaxed">{op.desc}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Error rate */}
+                  {aiStats.errors > 0 && (
+                    <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-red-300 font-bold">⚠️ Erros: {aiStats.errors}</span>
+                        <span className="text-[var(--muted)]">Taxa de erro: {Math.round(aiStats.errors / Math.max(aiStats.requests, 1) * 100)}%</span>
+                      </div>
+                      <p className="text-[10px] text-red-200/60 mt-1">Verifique se o Ollama está rodando, o modelo está carregado e há memória/GPU suficiente.</p>
+                    </div>
+                  )}
+
+                  {/* Configuration Guide */}
+                  <div className="p-4 rounded-lg bg-white/3 border border-white/10">
+                    <h4 className="text-xs font-bold text-fuchsia-300 mb-3">⚙️ Configuração</h4>
+                    <div className="grid grid-cols-2 gap-3 text-[10px]">
+                      <div><span className="text-[var(--muted)]">Provider:</span> <strong className="text-fuchsia-300">{aiStats.provider || "ollama"}</strong></div>
+                      <div><span className="text-[var(--muted)]">Model:</span> <strong className="text-fuchsia-300">{aiStats.model || "N/A"}</strong></div>
+                    </div>
+                    <div className="mt-3 p-2 rounded bg-black/30 font-mono text-[9px] text-fuchsia-100/70 space-y-0.5">
+                      <div>AI_PROVIDER=ollama</div>
+                      <div>OLLAMA_URL=http://host.docker.internal:11434</div>
+                      <div>AI_MODEL=mistral  # ou llama3, codellama</div>
+                    </div>
+                  </div>
+
+                  {/* AI Capabilities */}
+                  <div>
+                    <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Capacidades da AI</h4>
+                    <div className="space-y-2">
+                      {[
+                        { icon: "📝", title: "Geração de Reports", desc: "Cria relatórios profissionais com título atrativo, CVSS 3.1, CWE ID, steps detalhados, PoC com cURL/HTTP e remediação." },
+                        { icon: "🔬", title: "Classificação True/False Positive", desc: "Analisa evidências para determinar se um finding é real ou falso positivo, com score de confiança." },
+                        { icon: "🔗", title: "Vulnerability Chain Analysis", desc: "Identifica cadeias de vulnerabilidades (ex: SSRF → AWS metadata → RCE) para aumentar severidade e impacto." },
+                        { icon: "📊", title: "CVSS Scoring Automático", desc: "Calcula score CVSS 3.1 baseado nos vetores AV/AC/PR/UI/S/C/I/A extraídos do contexto da vulnerabilidade." },
+                        { icon: "💡", title: "Sugestão de Impacto", desc: "Gera descrições de impacto de negócio que triagers valorizam: compliance, data leak, financial loss, etc." },
+                      ].map(cap => (
+                        <div key={cap.title} className="flex gap-3 p-2 rounded-lg bg-white/3 hover:bg-white/5 transition-colors">
+                          <span className="text-base mt-0.5 flex-shrink-0">{cap.icon}</span>
+                          <div>
+                            <span className="text-xs font-bold text-[var(--foreground)]">{cap.title}</span>
+                            <p className="text-[10px] text-[var(--muted)] mt-0.5 leading-relaxed">{cap.desc}</p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center py-8">
+                  <div className="text-4xl mb-3">🤖</div>
+                  <div className="text-sm text-[var(--muted)] mb-2">AI não configurada</div>
+                  <p className="text-[10px] text-[var(--muted)] max-w-md mx-auto">Configure AI_PROVIDER=ollama e OLLAMA_URL no .env para habilitar geração automática de reports, classificação de findings e análise de responses.</p>
+                </div>
+              )}
+            </div>
+          </Modal>
+
+          {/* ── Recon Live Modal ── */}
+          <Modal open={activeModal === 'recon-live'} onClose={() => setActiveModal(null)} title="📡 Recon Live — Todos os Programas" maxWidth="max-w-4xl">
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
+                  <div className="text-xl font-bold text-indigo-400">{allPrograms.length}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase">Total Programas</div>
+                </div>
+                <div className="p-3 rounded-lg bg-blue-500/10 border border-blue-500/20">
+                  <div className="text-xl font-bold text-blue-400">{allPrograms.filter(p => p.status === "reconning").length}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase">Em Execução</div>
+                </div>
+                <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                  <div className="text-xl font-bold text-emerald-400">{allPrograms.filter(p => (p.alive_count ?? 0) > 0).length}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase">Com Targets</div>
+                </div>
+              </div>
+              <div className="border border-[var(--border)] rounded-xl overflow-hidden">
+                <div className="grid grid-cols-[1fr_80px_80px_80px_80px_80px] gap-0 px-3 py-2 bg-white/3 border-b border-[var(--border)] text-[9px] font-bold text-[var(--muted)] uppercase">
+                  <span>Programa</span><span className="text-center">Plataforma</span><span className="text-center">Targets</span><span className="text-center">Alive</span><span className="text-center">Vulns</span><span className="text-center">Status</span>
+                </div>
+                <div className="max-h-[50vh] overflow-y-auto divide-y divide-[var(--border)]">
+                  {allPrograms.map(p => {
+                    const isRunning = p.status === "reconning";
+                    const hasTargets = (p.alive_count ?? 0) > 0;
+                    return (
+                      <div key={p.id} className="grid grid-cols-[1fr_80px_80px_80px_80px_80px] gap-0 px-3 py-2.5 hover:bg-white/[0.02] transition-colors items-center">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className={`w-2 h-2 rounded-full shrink-0 ${isRunning ? "bg-blue-400 animate-pulse" : p.status === "error" ? "bg-red-400" : hasTargets ? "bg-emerald-400" : "bg-[var(--muted)]"}`} />
+                          <span className="text-xs font-medium text-[var(--foreground)] truncate">{p.name}</span>
+                        </div>
+                        <span className="text-[10px] text-[var(--muted)] text-center">{p.platform}</span>
+                        <span className="text-[10px] text-[var(--foreground)] text-center tabular-nums font-semibold">{p.target_count ?? 0}</span>
+                        <span className={`text-[10px] text-center tabular-nums font-semibold ${hasTargets ? "text-emerald-400" : "text-[var(--muted)]"}`}>{p.alive_count ?? 0}</span>
+                        <span className={`text-[10px] text-center tabular-nums font-semibold ${(p.vuln_count ?? 0) > 0 ? "text-red-400" : "text-[var(--muted)]"}`}>{p.vuln_count ?? 0}</span>
+                        <span className={`text-[9px] text-center font-bold px-1.5 py-0.5 rounded ${
+                          isRunning ? "bg-blue-500/15 text-blue-400" :
+                          p.status === "error" ? "bg-red-500/15 text-red-400" :
+                          p.status === "done" ? "bg-emerald-500/15 text-emerald-400" :
+                          "bg-white/5 text-[var(--muted)]"
+                        }`}>{p.status || "idle"}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              {allPrograms.length === 0 && (
+                <div className="text-center py-8 text-xs text-[var(--muted)]">Nenhum programa cadastrado. Vá em Programs para adicionar.</div>
+              )}
+            </div>
+          </Modal>
+
+          {/* ── Quick Actions Modal ── */}
+          <Modal open={activeModal === 'actions'} onClose={() => setActiveModal(null)} title="⚡ Quick Actions — Guia Completo" maxWidth="max-w-3xl">
+            <div className="space-y-4">
+              {[
+                { icon: "🔍", action: "Discover H1 Programs", desc: "Consulta a API pública da HackerOne para encontrar novos programas de bug bounty. Programas com bounty ativo e escopo web são importados automaticamente.", when: "Execute semanalmente para descobrir novos programas lançados." },
+                { icon: "📊", action: "Score Programs", desc: "Calcula um score de 0-100 para cada programa baseado em: valor máximo de bounty, quantidade de targets vivos, competição (número de hackers), tipo de escopo e safe harbor.", when: "Execute após importar novos programas ou após recon para atualizar scores." },
+                { icon: "📜", action: "Check CT Logs", desc: "Monitora Certificate Transparency logs para descobrir novos domínios emitidos por organizações dos seus programas. Domínios novos podem indicar serviços em staging/development.", when: "Execute diariamente — certificados novos indicam infraestrutura recém-deployada." },
+                { icon: "🛡", action: "Check CVE Feeds", desc: "Consulta feeds de CVE recentes (NVD, MITRE) e cria templates Nuclei customizados para vulnerabilidades relevantes ao seu portfólio de targets.", when: "Execute quando novos CVEs críticos são publicados (recomendado: diariamente)." },
+                { icon: "🔵", action: "Import Intigriti", desc: "Importa programas da plataforma Intigriti usando seu API token. Cria registros de programa com escopo, bounty range e informações de política.", when: "Execute ao configurar sua conta Intigriti ou semanalmente para atualizações." },
+                { icon: "🔄", action: "Recon All", desc: "Dispara reconhecimento em TODOS os programas registrados. Executa subfinder, crt.sh, httpx, rDNS e ASN discovery para cada programa.", when: "Use com cuidado — pode demorar horas com muitos programas. Prefira recon individual." },
+              ].map(a => (
+                <div key={a.action} className="p-4 rounded-xl bg-white/3 border border-white/10 hover:border-white/20 transition-colors">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className="text-lg">{a.icon}</span>
+                    <span className="text-sm font-bold text-[var(--foreground)]">{a.action}</span>
+                  </div>
+                  <p className="text-xs text-[var(--muted)] leading-relaxed mb-2">{a.desc}</p>
+                  <div className="flex items-start gap-1.5 p-2 rounded bg-blue-500/5 border border-blue-500/15">
+                    <span className="text-[10px]">⏰</span>
+                    <span className="text-[10px] text-blue-200/80">{a.when}</span>
+                  </div>
+                </div>
+              ))}
+              {/* Record Earning Guide */}
+              <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/15">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">💰</span>
+                  <span className="text-sm font-bold text-emerald-300">Record Earning</span>
+                </div>
+                <p className="text-xs text-emerald-200/70 leading-relaxed">Registre bounties recebidos para rastrear seu ROI. Informe o nome do programa e o valor em USD. O sistema usa esses dados para calcular: taxa de retorno, programa mais lucrativo, tipo de vulnerabilidade mais rentável e recomendações personalizadas.</p>
+              </div>
+            </div>
+          </Modal>
+
+          {/* ── Program Rankings Modal ── */}
+          <Modal open={activeModal === 'rankings'} onClose={() => setActiveModal(null)} title="🏆 Program Rankings — Detalhes" maxWidth="max-w-4xl">
+            <div className="space-y-4">
+              {/* Tier distribution */}
+              <div className="grid grid-cols-5 gap-2">
+                {["S", "A", "B", "C", "D"].map(tier => {
+                  const count = programs.filter(p => p.tier === tier).length;
+                  return (
+                    <div key={tier} className={`p-3 rounded-xl border text-center ${TIER_COLORS[tier] || "bg-slate-700 text-slate-300 border-slate-600"}`}>
+                      <div className="text-2xl font-bold">{tier}</div>
+                      <div className="text-lg font-bold tabular-nums mt-1">{count}</div>
+                      <div className="text-[9px] opacity-70 uppercase">programas</div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Full table */}
+              <div className="border border-[var(--border)] rounded-xl overflow-hidden">
+                <div className="grid grid-cols-[30px_40px_1fr_60px_80px_60px_1fr] gap-0 px-3 py-2 bg-white/3 border-b border-[var(--border)] text-[9px] font-bold text-[var(--muted)] uppercase">
+                  <span>#</span><span>Tier</span><span>Programa</span><span className="text-center">Score</span><span className="text-center">Bounty Max</span><span className="text-center">Targets</span><span>Recomendação</span>
+                </div>
+                <div className="max-h-[50vh] overflow-y-auto divide-y divide-[var(--border)]">
+                  {programs.map((p, i) => (
+                    <div key={p.program_id} className="grid grid-cols-[30px_40px_1fr_60px_80px_60px_1fr] gap-0 px-3 py-2.5 hover:bg-white/[0.02] transition-colors items-center">
+                      <span className="text-[10px] text-[var(--muted)] tabular-nums">{i + 1}</span>
+                      <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border w-fit ${TIER_COLORS[p.tier] || "bg-slate-700 text-slate-300 border-slate-600"}`}>{p.tier}</span>
+                      <span className="text-xs font-medium text-[var(--foreground)] truncate">{p.name}</span>
+                      <span className="text-xs font-bold text-center tabular-nums text-[var(--accent-light)]">{p.score}</span>
+                      <span className="text-[10px] text-center tabular-nums font-semibold text-emerald-400">{p.has_bounty && p.bounty_max ? `$${p.bounty_max.toLocaleString()}` : "—"}</span>
+                      <span className="text-[10px] text-center tabular-nums">{p.alive_targets}</span>
+                      <span className="text-[10px] text-[var(--muted)] truncate">{p.recommendation}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {programs.length === 0 && (
+                <div className="text-center py-8 text-xs text-[var(--muted)]">Nenhum programa pontuado. Use &quot;Score Programs&quot; nas Quick Actions.</div>
+              )}
+
+              {/* Scoring explanation */}
+              <div className="p-4 rounded-lg bg-white/3 border border-white/10">
+                <h4 className="text-xs font-bold text-[var(--foreground)] mb-2">📐 Como o Score é Calculado</h4>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[10px] text-[var(--muted)]">
+                  <div>• <strong className="text-[var(--foreground)]">Bounty (40%)</strong>: Valor máximo do bounty do programa</div>
+                  <div>• <strong className="text-[var(--foreground)]">Scope (25%)</strong>: Quantidade e tipo de assets in-scope</div>
+                  <div>• <strong className="text-[var(--foreground)]">Targets (20%)</strong>: Hosts vivos e acessíveis para scan</div>
+                  <div>• <strong className="text-[var(--foreground)]">Competição (15%)</strong>: Inverso do número de hackers ativos</div>
+                </div>
+              </div>
+            </div>
+          </Modal>
+
+          {/* ── Recent Activity Modal ── */}
+          <Modal open={activeModal === 'activity'} onClose={() => setActiveModal(null)} title="📋 Atividade Recente — Timeline" maxWidth="max-w-3xl">
+            <div className="space-y-4">
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="p-3 rounded-lg bg-lime-500/10 border border-lime-500/20">
+                  <div className="text-xl font-bold text-lime-400">{changes.length}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase">Mudanças</div>
+                </div>
+                <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
+                  <div className="text-xl font-bold text-emerald-400">{changes.reduce((acc, ch) => acc + (ch.new_subdomains?.length ?? 0), 0)}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase">Novos Subs</div>
+                </div>
+                <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                  <div className="text-xl font-bold text-red-400">{changes.reduce((acc, ch) => acc + (ch.removed_subdomains?.length ?? 0), 0)}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase">Removidos</div>
+                </div>
+              </div>
+              <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+                {changes.map((ch, i) => (
+                  <div key={ch.id || i} className="p-4 rounded-xl bg-white/3 border border-white/10 hover:border-lime-500/20 transition-colors">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-sm font-bold text-[var(--foreground)]">{ch.program_name}</span>
+                      <div className="flex items-center gap-2">
+                        {ch.new_subdomains?.length > 0 && <span className="text-xs font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded">+{ch.new_subdomains.length}</span>}
+                        {ch.removed_subdomains?.length > 0 && <span className="text-xs font-bold text-red-400 bg-red-500/10 px-2 py-0.5 rounded">-{ch.removed_subdomains.length}</span>}
+                        <span className="text-[10px] text-[var(--muted)]">{ch.total_current} total</span>
+                      </div>
+                    </div>
+                    {ch.timestamp && <div className="text-[9px] text-[var(--muted)] mb-2">{new Date(ch.timestamp).toLocaleString("pt-BR")}</div>}
+                    {ch.new_subdomains?.length > 0 && (
+                      <div className="mb-2">
+                        <div className="text-[9px] text-emerald-400 font-semibold uppercase mb-1">Novos subdomínios:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {ch.new_subdomains.map((s, j) => (
+                            <span key={j} className="text-[10px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/15 font-mono">{s}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {ch.removed_subdomains?.length > 0 && (
+                      <div>
+                        <div className="text-[9px] text-red-400 font-semibold uppercase mb-1">Removidos:</div>
+                        <div className="flex flex-wrap gap-1">
+                          {ch.removed_subdomains.map((s, j) => (
+                            <span key={j} className="text-[10px] px-2 py-0.5 rounded bg-red-500/10 text-red-300 border border-red-500/15 font-mono line-through">{s}</span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+                {changes.length === 0 && <div className="text-center py-8 text-xs text-[var(--muted)]">Nenhuma mudança detectada ainda. Execute recon para começar a monitorar.</div>}
+              </div>
+            </div>
+          </Modal>
+
+          {/* ── Intelligence / ROI Modal ── */}
+          <Modal open={activeModal === 'intelligence'} onClose={() => setActiveModal(null)} title="📊 Intelligence & ROI — Dashboard Completo" maxWidth="max-w-4xl">
+            <div className="space-y-6">
+              {/* Earnings Summary */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="p-4 rounded-xl bg-green-500/10 border border-green-500/20 text-center">
+                  <div className="text-2xl font-bold text-green-400">${(roi?.summary.total_earnings ?? 0).toLocaleString()}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase mt-1">Total Earnings</div>
+                </div>
+                <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-center">
+                  <div className="text-2xl font-bold text-emerald-400">{roi?.summary.total_reports_paid ?? 0}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase mt-1">Reports Pagos</div>
+                </div>
+                <div className="p-4 rounded-xl bg-teal-500/10 border border-teal-500/20 text-center">
+                  <div className="text-2xl font-bold text-teal-400">${(roi?.summary.avg_payout ?? 0).toLocaleString()}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase mt-1">Payout Médio</div>
+                </div>
+                <div className="p-4 rounded-xl bg-yellow-500/10 border border-yellow-500/20 text-center">
+                  <div className="text-2xl font-bold text-yellow-400">${(roi?.summary.highest_payout ?? 0).toLocaleString()}</div>
+                  <div className="text-[9px] text-[var(--muted)] uppercase mt-1">Maior Payout</div>
+                </div>
+              </div>
+
+              {/* Operations metrics */}
+              <div>
+                <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Operações</h4>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  {[
+                    { label: "Programas Ativos", val: roi?.operations.active_programs ?? 0, c: "text-indigo-400" },
+                    { label: "Reports Enviados", val: roi?.operations.reports_submitted ?? 0, c: "text-blue-400" },
+                    { label: "Reports Aceitos", val: roi?.operations.reports_accepted ?? 0, c: "text-emerald-400" },
+                    { label: "Taxa de Aceitação", val: `${roi?.operations.acceptance_rate ?? 0}%`, c: (roi?.operations.acceptance_rate ?? 0) > 50 ? "text-emerald-400" : "text-red-400" },
+                  ].map(m => (
+                    <div key={m.label} className="p-3 rounded-lg bg-white/5 border border-white/10 text-center">
+                      <div className={`text-xl font-bold tabular-nums ${m.c}`}>{typeof m.val === 'number' ? m.val.toLocaleString() : m.val}</div>
+                      <div className="text-[9px] text-[var(--muted)] uppercase mt-1">{m.label}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Monthly Trend (enlarged) */}
+              {roi && Object.keys(roi.monthly_trend).length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Tendência Mensal</h4>
+                  <div className="flex items-end gap-2 h-32 p-3 rounded-lg bg-white/3 border border-white/10">
+                    {Object.entries(roi.monthly_trend).slice(-12).map(([month, v]) => {
+                      const maxE = Math.max(...Object.values(roi.monthly_trend).map(x => x.earnings), 1);
+                      return (
+                        <div key={month} className="flex-1 flex flex-col items-center gap-1 h-full justify-end">
+                          <span className="text-[9px] text-emerald-400 font-bold tabular-nums">${v.earnings}</span>
+                          <div className="w-full rounded-t bg-gradient-to-t from-emerald-600 to-emerald-400 hover:from-emerald-500 hover:to-emerald-300 transition-colors min-h-[2px]"
+                            style={{ height: `${Math.max((v.earnings / maxE) * 100, 4)}%` }}
+                            title={`${month}: $${v.earnings} (${v.count} reports)`} />
+                          <span className="text-[8px] text-[var(--muted)] tabular-nums">{month.slice(-5)}</span>
+                          <span className="text-[8px] text-[var(--muted)]">{v.count}r</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Top Programs */}
+              {roi && roi.top_programs.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Programas Mais Lucrativos</h4>
+                  <div className="space-y-2">
+                    {roi.top_programs.map((p, i) => (
+                      <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-white/3 border border-white/10 hover:border-emerald-500/20 transition-colors">
+                        <span className="text-lg font-bold text-[var(--muted)] w-6 text-center">{i + 1}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-bold text-[var(--foreground)] truncate">{p.name}</div>
+                          <div className="text-[10px] text-[var(--muted)]">{p.reports} reports • ${p.hourly_rate}/h • {p.efficiency}</div>
+                        </div>
+                        <span className="text-lg font-bold text-emerald-400 tabular-nums">${p.earned.toLocaleString()}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Most profitable vulns */}
+              {roi && roi.most_profitable_vulns.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Tipos de Vulnerabilidade Mais Rentáveis</h4>
+                  <div className="space-y-2">
+                    {roi.most_profitable_vulns.map((v, i) => {
+                      const maxAvg = Math.max(...roi.most_profitable_vulns.map(x => x.avg_payout), 1);
+                      return (
+                        <div key={i} className="group">
+                          <div className="flex items-center justify-between mb-1 text-xs">
+                            <span className="font-semibold text-[var(--foreground)]">{v.type}</span>
+                            <div className="flex items-center gap-3">
+                              <span className="text-[var(--muted)]">{v.count} reports</span>
+                              <span className="text-amber-400 font-bold tabular-nums">avg ${v.avg_payout}</span>
+                              <span className="text-emerald-400 font-bold tabular-nums">${v.earnings}</span>
+                            </div>
+                          </div>
+                          <div className="h-2 rounded-full bg-white/5 overflow-hidden">
+                            <div className="h-full rounded-full bg-gradient-to-r from-amber-500 to-yellow-400 transition-all" style={{ width: `${(v.avg_payout / maxAvg) * 100}%` }} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Recent CVEs */}
+              {recentCVEs.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">CVEs Recentes</h4>
+                  <div className="space-y-1.5">
+                    {recentCVEs.slice(0, 10).map((cve: any, i: number) => (
+                      <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-white/3 hover:bg-white/5 transition-colors">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="text-xs font-mono font-bold text-[var(--foreground)]">{cve.id}</span>
+                          {cve.description && <span className="text-[10px] text-[var(--muted)] truncate max-w-xs">{cve.description}</span>}
+                        </div>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                          cve.severity === "critical" ? "bg-red-500/15 text-red-400" :
+                          cve.severity === "high" ? "bg-orange-500/15 text-orange-400" :
+                          "bg-amber-500/15 text-amber-400"
+                        }`}>{cve.cvss_score}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Recommendations */}
+              {roi && roi.recommendations.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-bold text-[var(--foreground)] mb-3 uppercase tracking-wider">Recomendações</h4>
+                  <div className="space-y-2">
+                    {roi.recommendations.map((r, i) => (
+                      <div key={i} className="flex gap-2 p-3 rounded-lg bg-teal-500/5 border border-teal-500/15">
+                        <span className="text-base flex-shrink-0">💡</span>
+                        <span className="text-xs text-teal-200/80 leading-relaxed">{r}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </Modal>
 
         </>
       )}

@@ -51,3 +51,6 @@ nuclei-templates/
 *.bak
 *.tmp
 .mypy_cache/
+
+# Frontend build artifacts
+frontend/tsconfig.tsbuildinfo

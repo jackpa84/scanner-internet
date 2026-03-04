@@ -24,6 +24,11 @@ from app.report_generator import (
     generate_h1_report,
     VULN_TEMPLATES,
 )
+from app.program_matcher import (
+    match_ip_to_programs,
+    get_programs_for_report,
+    filter_reports_by_eligibility,
+)
 
 logger = logging.getLogger("scanner.report_processor")
 
@@ -50,24 +55,65 @@ def get_db():
 def _format_vuln_for_h1(vuln: dict) -> dict[str, Any]:
     """
     Convert enriched vulnerability to H1-compatible format.
+    Extrai evidência completa: URL, HTTP request/response, curl command, CVSS.
     
     Args:
         vuln: Enriched vulnerability document from vuln_results
     
     Returns:
-        H1-formatted finding dictionary
+        H1-formatted finding dictionary with full evidence chain
     """
+    # Construir evidência rica a partir de todos os dados disponíveis
+    evidence_parts = []
+    if vuln.get("matched_at"):
+        evidence_parts.append(f"**Affected URL:** `{vuln['matched_at']}`")
+    if vuln.get("proof"):
+        evidence_parts.append(f"**Proof:** {vuln['proof']}")
+    if vuln.get("evidence"):
+        evidence_parts.append(f"**Scanner Evidence:** {vuln['evidence']}")
+
+    # HTTP Request/Response para reprodução
+    http_request = vuln.get("http_request", "")
+    http_response = vuln.get("http_response", "")
+    curl_command = vuln.get("curl_command", "")
+
+    if curl_command:
+        evidence_parts.append(f"\n**cURL command to reproduce:**\n```\n{curl_command}\n```")
+    if http_request:
+        evidence_parts.append(f"\n**HTTP Request:**\n```http\n{http_request[:1500]}\n```")
+    if http_response:
+        evidence_parts.append(f"\n**HTTP Response (truncated):**\n```http\n{http_response[:1500]}\n```")
+
+    full_evidence = "\n".join(evidence_parts) if evidence_parts else vuln.get("description", "")
+
+    # CVSS: preferir dados reais do scanner sobre templates
+    cvss_score = vuln.get("cvss_score", 0)
+    cvss_vector = vuln.get("cvss_vector", "")
+    if not cvss_score or cvss_score == 0:
+        severity_scores = {"critical": 9.8, "high": 8.5, "medium": 5.5, "low": 3.1, "info": 0.0}
+        cvss_score = severity_scores.get(vuln.get("severity", "medium"), 5.5)
+
     return {
-        "code": vuln.get("type", "cve"),
-        "title": vuln.get("title", f"Vulnerability: {vuln.get('cve_id', 'Unknown')}"),
+        "code": vuln.get("type", vuln.get("template_id", "cve")),
+        "title": vuln.get("title", vuln.get("name", f"Vulnerability: {vuln.get('cve_id', 'Unknown')}")),
         "severity": vuln.get("severity", "medium"),
         "description": vuln.get("description", ""),
-        "evidence": vuln.get("evidence", ""),
+        "evidence": full_evidence,
+        "matched_at": vuln.get("matched_at", ""),
+        "curl_command": curl_command,
+        "http_request": http_request,
+        "http_response": http_response,
+        "response_body": http_response,
+        "response_headers": "",
         "remediation": vuln.get("remediation", "Apply security updates"),
         "cve_id": vuln.get("cve_id", ""),
-        "cwe": vuln.get("cwe", ""),
-        "cvss_base": vuln.get("cvss_base", 5.5),
+        "cwe": vuln.get("cwe", vuln.get("cwe_id", "")),
+        "cvss_base": cvss_score,
+        "cvss_vector": cvss_vector,
         "confidence": vuln.get("confidence", 0.5),
+        "tool": vuln.get("tool", ""),
+        "hostname": vuln.get("hostname", ""),
+        "references": vuln.get("references", []),
     }
 
 
@@ -130,37 +176,107 @@ def process_vulnerabilities_to_reports(
                 continue
             
             try:
-                # Format findings for H1
+                # ── Validação IN-SCOPE ──
+                # Verificar se o IP/hostname pertence a algum programa bounty
+                hostname = ip_vulns[0].get("hostname", "")
+                matched_programs = []
+                try:
+                    matched_programs = match_ip_to_programs(ip)
+                    if hostname and not matched_programs:
+                        matched_programs = match_ip_to_programs(hostname)
+                except Exception as e:
+                    logger.debug(f"Program matching skipped for {ip}: {e}")
+
+                # Se não encontrou programa, marcar como "no_program"
+                program_name = "Unknown Program"
+                program_handle = ""
+                in_scope = False
+                if matched_programs:
+                    prog = matched_programs[0]  # Melhor match
+                    program_name = prog.get("name", "Unknown Program")
+                    program_handle = prog.get("handle", prog.get("platform_id", ""))
+                    in_scope = prog.get("in_scope", True)
+                
+                # Format findings for H1 (agora com evidência completa)
                 findings = [_format_vuln_for_h1(v) for v in ip_vulns]
+                
+                # Usar hostname real quando disponível
+                report_domain = hostname or ip
                 
                 # Generate H1 report
                 h1_report = generate_h1_report(
-                    domain=ip,
+                    domain=report_domain,
                     findings=findings,
-                    program_name=f"Security Assessment - {ip}",
+                    program_name=program_name,
                 )
+                
+                # ── Calcular CVSS real ──
+                # Preferir CVSS do scanner sobre score genérico
+                real_cvss_score = h1_report["cvss_score"]
+                real_cvss_vector = h1_report["cvss_vector"]
+                for v in ip_vulns:
+                    scanner_cvss = v.get("cvss_score", 0)
+                    if scanner_cvss and scanner_cvss > real_cvss_score:
+                        real_cvss_score = scanner_cvss
+                        real_cvss_vector = v.get("cvss_vector", real_cvss_vector)
                 
                 # Build report document
                 report_doc = {
                     # Core report data
                     "ip": ip,
+                    "hostname": hostname,
+                    "domain": report_domain,
                     "title": h1_report["title"],
                     "body": h1_report["body"],
                     "severity": h1_report["severity"],
                     "impact": h1_report["impact"],
                     "weakness": h1_report["weakness"],
-                    "cvss_vector": h1_report["cvss_vector"],
-                    "cvss_score": h1_report["cvss_score"],
+                    "cvss_vector": real_cvss_vector,
+                    "cvss_score": real_cvss_score,
                     "confidence": h1_report["confidence"],
+                    
+                    # Evidência completa para reprodução
+                    "evidence": {
+                        "matched_urls": [v.get("matched_at", "") for v in ip_vulns if v.get("matched_at")],
+                        "curl_commands": [v.get("curl_command", "") for v in ip_vulns if v.get("curl_command")],
+                        "http_requests": [v.get("http_request", "")[:1500] for v in ip_vulns if v.get("http_request")],
+                        "http_responses": [v.get("http_response", "")[:1500] for v in ip_vulns if v.get("http_response")],
+                        "proofs": [v.get("proof", "") for v in ip_vulns if v.get("proof")],
+                        "tools_used": list(set(v.get("tool", "") for v in ip_vulns if v.get("tool"))),
+                    },
+                    
+                    # Programa bounty e validação in-scope
+                    "program": {
+                        "name": program_name,
+                        "handle": program_handle,
+                        "in_scope": in_scope,
+                        "matched": len(matched_programs) > 0,
+                    },
                     
                     # Vulnerability references
                     "vulnerability_count": h1_report["findings_count"],
                     "vulnerability_ids": [v.get("_id") for v in ip_vulns],
                     "cve_ids": [v.get("cve_id") for v in ip_vulns if v.get("cve_id")],
+                    "cwe_ids": list(set(
+                        cwe for v in ip_vulns 
+                        for cwe in (v.get("cwe_id", []) if isinstance(v.get("cwe_id"), list) else [v.get("cwe_id", "")])
+                        if cwe
+                    )),
                     
                     # Status tracking
-                    "status": "draft",
-                    "auto_submit_eligible": h1_report["auto_submit_eligible"],
+                    "status": "draft" if in_scope or not matched_programs else "out_of_scope",
+                    "auto_submit_eligible": h1_report["auto_submit_eligible"] and in_scope,
+                    
+                    # Checklist H1 — campos obrigatórios para submissão
+                    "h1_readiness": {
+                        "has_evidence": bool(any(v.get("matched_at") for v in ip_vulns)),
+                        "has_cvss": real_cvss_score > 0,
+                        "has_steps_to_reproduce": "## Steps to Reproduce" in h1_report["body"],
+                        "has_impact": bool(h1_report["impact"]),
+                        "has_remediation": "## Remediation" in h1_report["body"],
+                        "is_in_scope": in_scope or not matched_programs,
+                        "ready_to_submit": False,  # será calculado abaixo
+                    },
                     
                     # Timestamps
                     "created_at": datetime.utcnow(),
@@ -171,6 +287,17 @@ def process_vulnerabilities_to_reports(
                     "tags": [h1_report["severity"], "auto_generated"],
                     "notes": "",
                 }
+                
+                # Calcular readiness final
+                readiness = report_doc["h1_readiness"]
+                readiness["ready_to_submit"] = all([
+                    readiness["has_evidence"],
+                    readiness["has_cvss"],
+                    readiness["has_steps_to_reproduce"],
+                    readiness["has_impact"],
+                    readiness["has_remediation"],
+                    readiness["is_in_scope"],
+                ])
                 
                 # Insert into reports collection
                 result = report_col.insert_one(report_doc)

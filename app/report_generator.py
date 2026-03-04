@@ -982,8 +982,10 @@ def generate_h1_report(
         f"| **Type** | {primary.get('title', 'Security Finding')} |",
         f"| **Severity** | {severity.upper()} |",
         f"| **Weakness** | {template['weakness']} |",
-        f"| **CVSS 3.1** | `{template['cvss_vector']}` (Base: **{CVSS_BASE_SCORES.get(severity, 5.5):.1f}**) |",
+        f"| **CVSS 3.1** | `{primary.get('cvss_vector') or template['cvss_vector']}` (Base: **{primary.get('cvss_base') or CVSS_BASE_SCORES.get(severity, 5.5):.1f}**) |",
         f"| **Confidence** | {calculate_confidence(primary)}% |",
+        f"| **Tool** | {primary.get('tool', 'nuclei')} |",
+        f"| **Affected URL** | `{primary.get('matched_at', domain)}` |",
         "",
     ])
 
@@ -1005,23 +1007,47 @@ def generate_h1_report(
     body_parts.extend(steps)
 
     evidence = primary.get("evidence", "")
-    response_body = primary.get("response_body", "")
+    response_body = primary.get("response_body", primary.get("http_response", ""))
     response_headers = primary.get("response_headers", "")
+    http_request = primary.get("http_request", "")
+    curl_command = primary.get("curl_command", "")
+    matched_at = primary.get("matched_at", "")
 
-    if response_body or response_headers or (evidence and len(evidence) > 100):
+    # Sempre incluir seção de PoC se houver qualquer evidência
+    has_poc = response_body or response_headers or http_request or curl_command or (evidence and len(evidence) > 50)
+
+    if has_poc:
         body_parts.append("\n## Proof of Concept\n")
+
+        if matched_at:
+            body_parts.append(f"**Affected URL:** `{matched_at}`\n")
+
+        if curl_command:
+            body_parts.append("**Reproduce with cURL:**")
+            body_parts.append("```bash")
+            body_parts.append(_redact_secrets(str(curl_command)[:800]))
+            body_parts.append("```\n")
+
+        if http_request:
+            body_parts.append("**HTTP Request:**")
+            body_parts.append("```http")
+            body_parts.append(_redact_secrets(str(http_request)[:1500]))
+            body_parts.append("```\n")
+
         if response_headers:
             body_parts.append("**Response Headers:**")
             body_parts.append("```http")
             body_parts.append(_redact_secrets(str(response_headers)[:500]))
-            body_parts.append("```")
+            body_parts.append("```\n")
+
         if response_body:
-            body_parts.append("**Response Body (truncated):**")
+            body_parts.append("**HTTP Response (truncated):**")
             body_parts.append("```")
-            body_parts.append(_redact_secrets(str(response_body)[:800]))
-            body_parts.append("```")
-        elif evidence and len(evidence) > 100:
-            body_parts.append("**Evidence:**")
+            body_parts.append(_redact_secrets(str(response_body)[:1500]))
+            body_parts.append("```\n")
+
+        if evidence and len(evidence) > 50 and not http_request and not response_body:
+            body_parts.append("**Scanner Evidence:**")
             body_parts.append("```")
             body_parts.append(_redact_secrets(evidence[:800]))
             body_parts.append("```")
@@ -1049,14 +1075,22 @@ def generate_h1_report(
         f"\n---\n*Security assessment performed on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}*"
     )
 
+    # Usar CVSS real do scanner quando disponível
+    real_cvss_score = primary.get("cvss_base", 0)
+    real_cvss_vector = primary.get("cvss_vector", "")
+    if not real_cvss_score or real_cvss_score == 0:
+        real_cvss_score = CVSS_BASE_SCORES.get(severity, 5.5)
+    if not real_cvss_vector:
+        real_cvss_vector = template["cvss_vector"]
+
     return {
         "title": title[:250],
         "body": "\n".join(body_parts),
         "severity": severity,
         "impact": impact,
         "weakness": template["weakness"],
-        "cvss_vector": template["cvss_vector"],
-        "cvss_score": CVSS_BASE_SCORES.get(severity, 5.5),
+        "cvss_vector": real_cvss_vector,
+        "cvss_score": real_cvss_score,
         "confidence": calculate_confidence(primary),
         "auto_submit_eligible": should_auto_submit(primary),
         "findings_count": len(findings),

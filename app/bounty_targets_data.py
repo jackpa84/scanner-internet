@@ -448,8 +448,25 @@ def search_programs(
     platform: str = "",
     bounty_only: bool = False,
     limit: int = 50,
+    asset_type: str = "",
+    min_scope: int = 0,
+    has_wildcards: bool = False,
+    sort_by: str = "newest",
+    scope_changed: bool = False,
 ) -> list[dict]:
-    """Search imported programs."""
+    """Search imported programs with advanced filters.
+
+    Args:
+        query: text search on name + in_scope (regex)
+        platform: filter by platform (hackerone, bugcrowd, etc.)
+        bounty_only: only programs offering bounties
+        limit: max results
+        asset_type: filter by asset type (url, domain, wildcard, api, mobile, etc.)
+        min_scope: minimum number of in_scope items
+        has_wildcards: only programs with wildcard domains (*.example.com)
+        sort_by: newest | scope_size | name | bounty_changed
+        scope_changed: only programs with recent scope changes
+    """
     col = get_bounty_programs()
     filt: dict[str, Any] = {"source": "bounty-targets-data"}
 
@@ -457,17 +474,30 @@ def search_programs(
         filt["platform"] = platform
     if bounty_only:
         filt["has_bounty"] = True
+    if scope_changed:
+        filt["scope_changed"] = True
+    if asset_type:
+        filt["asset_types"] = {"$regex": asset_type, "$options": "i"}
     if query:
         filt["$or"] = [
             {"name": {"$regex": query, "$options": "i"}},
             {"in_scope": {"$regex": query, "$options": "i"}},
+            {"handle": {"$regex": query, "$options": "i"}},
         ]
+
+    sort_map = {
+        "newest": ("created_at", -1),
+        "name": ("name", 1),
+        "scope_size": ("_scope_count", -1),
+        "bounty_changed": ("scope_change_detected", -1),
+    }
+    sort_field, sort_dir = sort_map.get(sort_by, ("created_at", -1))
 
     # RedisCollection may not support $or/$regex, fall back to manual filter
     try:
-        results = list(col.find(filt).sort("created_at", -1).limit(limit))
+        results = list(col.find(filt).sort(sort_field, sort_dir).limit(limit * 3))
     except Exception:
-        all_progs = list(col.find({"source": "bounty-targets-data"}).limit(500))
+        all_progs = list(col.find({"source": "bounty-targets-data"}).limit(2000))
         results = []
         q = query.lower()
         for p in all_progs:
@@ -475,16 +505,44 @@ def search_programs(
                 continue
             if bounty_only and not p.get("has_bounty"):
                 continue
+            if scope_changed and not p.get("scope_changed"):
+                continue
+            if asset_type:
+                types_str = " ".join(p.get("asset_types", [])).lower()
+                if asset_type.lower() not in types_str:
+                    continue
             if q:
                 name_match = q in (p.get("name", "")).lower()
                 scope_match = any(q in s.lower() for s in p.get("in_scope", []))
-                if not name_match and not scope_match:
+                handle_match = q in (p.get("handle", "")).lower()
+                if not name_match and not scope_match and not handle_match:
                     continue
             results.append(p)
-            if len(results) >= limit:
-                break
 
-    return results
+    # Enrich results with computed fields and apply in-memory filters
+    enriched = []
+    for p in results:
+        scope = p.get("in_scope", [])
+        scope_count = len(scope)
+        wildcard_count = sum(1 for s in scope if s.startswith("*.") or s.startswith("*"))
+        p["scope_count"] = scope_count
+        p["wildcard_count"] = wildcard_count
+        p["scope_preview"] = scope[:8]
+
+        if min_scope > 0 and scope_count < min_scope:
+            continue
+        if has_wildcards and wildcard_count == 0:
+            continue
+
+        enriched.append(p)
+        if len(enriched) >= limit:
+            break
+
+    # Sort in-memory for computed fields
+    if sort_by == "scope_size":
+        enriched.sort(key=lambda x: x.get("scope_count", 0), reverse=True)
+
+    return enriched
 
 
 def get_all_bounty_domains() -> dict[str, list[str]]:

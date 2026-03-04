@@ -1,0 +1,39 @@
+# Arquivo otimizado para EC2 t3.small (2GB RAM, 2 vCPU)
+# Use com: docker compose -f docker-compose.yml -f docker-compose.production.yml up -d
+
+services:
+  redis:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+        reservations:
+          cpus: "0.2"
+          memory: 256m
+
+  app:
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768m
+        reservations:
+          cpus: "0.3"
+          memory: 256m
+    environment:
+      NUM_WORKERS: "150"
+      MALLOC_ARENA_MAX: "1"
+      UV_THREADPOOL_SIZE: "32"
+
+  frontend:
+    environment:
+      NODE_OPTIONS: "--max-old-space-size=512"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768m
+        reservations:
+          cpus: "0.5"
+          memory: 256m

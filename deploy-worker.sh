@@ -134,20 +134,20 @@ done
 # ─── 7. Copiar arquivos (sem frontend) ──────────────────────────────
 echo "==> Copiando projeto para worker..."
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEPLOY_IGNORE_FILE="${SCRIPT_DIR}/.deployignore"
 
 ssh -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" "ubuntu@${WORKER_IP}" "mkdir -p ~/app"
 
-scp -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" -r \
-  "${SCRIPT_DIR}/docker-compose.worker.yml" \
-  "${SCRIPT_DIR}/Dockerfile" \
-  "${SCRIPT_DIR}/pyproject.toml" \
-  "${SCRIPT_DIR}/app" \
-  "${SCRIPT_DIR}/tools" \
-  "ubuntu@${WORKER_IP}:~/app/"
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "[ERRO] rsync não encontrado localmente. Instale rsync para deploy filtrado."
+  exit 1
+fi
 
-[ -f "${SCRIPT_DIR}/poetry.lock" ] && \
-  scp -o StrictHostKeyChecking=no -i "${KEY_NAME}.pem" \
-    "${SCRIPT_DIR}/poetry.lock" "ubuntu@${WORKER_IP}:~/app/"
+rsync -az --delete \
+  --exclude-from="${DEPLOY_IGNORE_FILE}" \
+  --exclude="frontend/" \
+  -e "ssh -o StrictHostKeyChecking=no -i ${KEY_NAME}.pem" \
+  "${SCRIPT_DIR}/" "ubuntu@${WORKER_IP}:~/app/"
 
 # ─── 8. Configurar e subir ──────────────────────────────────────────
 echo "==> Subindo worker container..."

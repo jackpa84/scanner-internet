@@ -31,8 +31,6 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (username: string, password: string) => {
     await apiLogin(username, password);
     setAuthenticated(true);
-    // Recarrega a pagina para o dashboard montar com o token no localStorage
-    if (typeof window !== "undefined") window.location.reload();
   };
 
   const logout = () => {

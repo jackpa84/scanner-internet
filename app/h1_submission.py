@@ -25,14 +25,18 @@ MONGODB_URI = os.getenv(
     "mongodb://admin:admin%40321@34.193.59.58:27017/admin?authSource=admin",
 )
 
-# HackerOne configuration
-H1_API_TOKEN = os.getenv("H1_API_TOKEN", "")
-H1_PROGRAM_HANDLE = os.getenv("H1_PROGRAM_HANDLE", "")
+# HackerOne configuration – accept either H1_API_TOKEN or HACKERONE_API_TOKEN
+H1_API_TOKEN = (os.getenv("H1_API_TOKEN") or os.getenv("HACKERONE_API_TOKEN") or "").strip()
+H1_PROGRAM_HANDLE = (os.getenv("H1_PROGRAM_HANDLE") or "").strip()
+H1_API_USERNAME = (os.getenv("HACKERONE_API_USERNAME") or "").strip()
 H1_API_URL = "https://api.hackerone.com/v1"
 
 # Submission queue settings
 RETRY_LIMIT = int(os.getenv("H1_RETRY_LIMIT", "3"))
-AUTO_SUBMIT_ENABLED = os.getenv("H1_AUTO_SUBMIT", "false").lower() in ("1", "true", "yes")
+AUTO_SUBMIT_ENABLED = os.getenv("H1_AUTO_SUBMIT", "true").lower() in ("1", "true", "yes")
+AUTO_SUBMIT_INTERVAL = int(os.getenv("H1_AUTO_SUBMIT_INTERVAL", "300"))  # seconds
+AUTO_SUBMIT_BATCH = int(os.getenv("H1_AUTO_SUBMIT_BATCH", "10"))
+AUTO_SUBMIT_DRY_RUN = os.getenv("H1_AUTO_SUBMIT_DRY_RUN", "false").lower() in ("1", "true", "yes")
 
 
 def get_db():
@@ -47,12 +51,19 @@ def get_db():
 
 
 def _validate_credentials() -> tuple[bool, str]:
-    """Validate H1 API credentials are configured."""
-    if not H1_API_TOKEN:
-        return False, "H1_API_TOKEN not configured"
-    if not H1_PROGRAM_HANDLE:
-        return False, "H1_PROGRAM_HANDLE not configured"
-    return True, "OK"
+    """Validate H1 API credentials are configured.
+    
+    Accepts either:
+      - H1_API_TOKEN + H1_PROGRAM_HANDLE (bearer/program-specific)
+      - HACKERONE_API_TOKEN + HACKERONE_API_USERNAME (basic auth)
+    """
+    if not H1_API_TOKEN and not H1_API_USERNAME:
+        return False, "No HackerOne credentials configured (set HACKERONE_API_TOKEN+HACKERONE_API_USERNAME or H1_API_TOKEN)"
+    if H1_API_TOKEN:
+        return True, "OK"
+    if H1_API_USERNAME:
+        return True, "OK (basic auth)"
+    return False, "No valid credentials"
 
 
 def _get_h1_headers() -> dict[str, str]:
@@ -375,6 +386,87 @@ def get_submission_queue() -> list[dict]:
     
     reports = list(report_col.find({"status": "draft"}).limit(50))
     return reports
+
+
+# ---------------------------------------------------------------------------
+# Auto-submit background loop
+# ---------------------------------------------------------------------------
+import time
+import threading
+
+
+def _auto_submit_loop() -> None:
+    """
+    Background loop that automatically:
+      1. Processes confirmed vulnerabilities → generates H1 reports
+      2. Submits ready reports to HackerOne
+
+    Runs every H1_AUTO_SUBMIT_INTERVAL seconds (default 300s = 5 min).
+    """
+    from app.report_processor import process_vulnerabilities_to_reports
+
+    logger.info(
+        "[H1-AUTO] Pipeline ativo | interval=%ds | batch=%d | dry_run=%s | credentials=%s",
+        AUTO_SUBMIT_INTERVAL,
+        AUTO_SUBMIT_BATCH,
+        AUTO_SUBMIT_DRY_RUN,
+        "OK" if _validate_credentials()[0] else "MISSING",
+    )
+
+    # Wait a bit for other systems to initialize
+    time.sleep(30)
+
+    while True:
+        try:
+            # ── Step 1: Generate reports from confirmed vulns ──
+            gen_results = process_vulnerabilities_to_reports(
+                limit=AUTO_SUBMIT_BATCH * 5,
+                severity_threshold="low",
+            )
+            if gen_results["reports_generated"] > 0:
+                logger.info(
+                    "[H1-AUTO] Gerados %d reports de %d vulns (%d erros)",
+                    gen_results["reports_generated"],
+                    gen_results["processed_vulns"],
+                    gen_results["errors"],
+                )
+
+            # ── Step 2: Submit ready reports to HackerOne ──
+            valid, msg = _validate_credentials()
+            if valid:
+                submit_results = batch_submit_reports(
+                    limit=AUTO_SUBMIT_BATCH,
+                    auto_only=True,
+                    dry_run=AUTO_SUBMIT_DRY_RUN,
+                )
+                submitted = submit_results["submitted"]
+                if submitted > 0:
+                    logger.info(
+                        "[H1-AUTO] Enviados %d | duplicados %d | erros %d | skipped %d",
+                        submitted,
+                        submit_results["duplicates"],
+                        submit_results["errors"],
+                        submit_results["skipped"],
+                    )
+            else:
+                # Still log periodically so user knows credentials are missing
+                logger.debug("[H1-AUTO] Credenciais H1 ausentes (%s) — reports gerados mas não enviados", msg)
+
+        except Exception as e:
+            logger.warning("[H1-AUTO] Erro no pipeline: %s", e)
+
+        time.sleep(AUTO_SUBMIT_INTERVAL)
+
+
+def start_h1_auto_submit() -> None:
+    """Start the H1 auto-submit background thread."""
+    if not AUTO_SUBMIT_ENABLED:
+        logger.info("[H1-AUTO] Auto-submit desabilitado (H1_AUTO_SUBMIT=false)")
+        return
+
+    t = threading.Thread(target=_auto_submit_loop, name="h1-auto-submit", daemon=True)
+    t.start()
+    logger.info("[H1-AUTO] Thread de auto-submit iniciada")
 
 
 if __name__ == "__main__":

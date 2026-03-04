@@ -40,6 +40,38 @@ TESTSSL_ENABLED = os.getenv("TESTSSL_ENABLED", "true").lower() in ("1", "true", 
 TESTSSL_TIMEOUT = int(os.getenv("TESTSSL_TIMEOUT", "90"))
 WAFW00F_ENABLED = os.getenv("WAFW00F_ENABLED", "true").lower() in ("1", "true", "yes")
 
+_TELE_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+_TELE_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
+
+
+def _notify_vuln_findings(ip: str, hostname: str, findings: list) -> None:
+    if not _TELE_TOKEN or not _TELE_CHAT:
+        return
+    critical = [f for f in findings if f.get("severity") == "critical"]
+    high     = [f for f in findings if f.get("severity") == "high"]
+    if not critical and not high:
+        return
+    target = hostname or ip
+    lines = [f"🔍 *Nuclei* — `{target}`"]
+    if critical:
+        lines.append(f"🔴 *{len(critical)} CRITICAL*")
+        for f in critical[:3]:
+            lines.append(f"  • {f.get('name', f.get('template_id', '?'))}")
+    if high:
+        lines.append(f"🟠 *{len(high)} HIGH*")
+        for f in high[:3]:
+            lines.append(f"  • {f.get('name', f.get('template_id', '?'))}")
+    try:
+        import requests as _req
+        _req.post(
+            f"https://api.telegram.org/bot{_TELE_TOKEN}/sendMessage",
+            json={"chat_id": _TELE_CHAT, "text": "\n".join(lines), "parse_mode": "Markdown"},
+            timeout=10,
+        )
+    except Exception as e:
+        logger.warning("[VULN] Telegram notify falhou: %s", e)
+
+
 _vuln_queue: queue.PriorityQueue = queue.PriorityQueue(maxsize=500)
 _scanned_ips: set[str] = set()
 _scanned_lock = threading.Lock()
@@ -159,18 +191,45 @@ def run_nuclei_scan(ip: str, ports: list[int] | None = None, cves: list[str] | N
                 continue
             try:
                 obj = json.loads(line)
+                # Capturar evidência completa para HackerOne
+                request_raw = obj.get("request", obj.get("curl-command", ""))
+                response_raw = obj.get("response", "")
+                extracted = obj.get("extracted-results", "")
+                matcher = obj.get("matcher-name", "")
+                matched_url = obj.get("matched-at", obj.get("host", ""))
+                curl_cmd = obj.get("curl-command", "")
+                interaction = obj.get("interaction", {})
+
+                # Montar evidência rica
+                evidence_parts = []
+                if matched_url:
+                    evidence_parts.append(f"URL: {matched_url}")
+                if extracted:
+                    evidence_parts.append(f"Extracted: {extracted if isinstance(extracted, str) else json.dumps(extracted)}")
+                if matcher:
+                    evidence_parts.append(f"Matcher: {matcher}")
+                if interaction:
+                    evidence_parts.append(f"OOB Interaction: {json.dumps(interaction)[:500]}")
+
                 findings.append({
                     "tool": "nuclei",
                     "template_id": obj.get("template-id", obj.get("templateID", "")),
                     "name": obj.get("info", {}).get("name", obj.get("template-id", "")),
                     "severity": obj.get("info", {}).get("severity", "info"),
                     "description": obj.get("info", {}).get("description", ""),
-                    "matched_at": obj.get("matched-at", obj.get("host", "")),
-                    "proof": obj.get("extracted-results", obj.get("matcher-name", "")),
+                    "matched_at": matched_url,
+                    "proof": str(extracted or matcher)[:2000],
+                    "evidence": "\n".join(evidence_parts),
                     "references": obj.get("info", {}).get("reference", []) or [],
-                    "port": _extract_port(obj.get("matched-at", "")),
+                    "port": _extract_port(matched_url),
                     "tags": obj.get("info", {}).get("tags", []) or [],
-                    "curl_command": obj.get("curl-command", ""),
+                    "curl_command": curl_cmd,
+                    "http_request": str(request_raw)[:3000],
+                    "http_response": str(response_raw)[:3000],
+                    "cvss_vector": obj.get("info", {}).get("classification", {}).get("cvss-metrics", ""),
+                    "cvss_score": obj.get("info", {}).get("classification", {}).get("cvss-score", 0),
+                    "cwe_id": obj.get("info", {}).get("classification", {}).get("cwe-id", []),
+                    "cve_id": obj.get("info", {}).get("classification", {}).get("cve-id", []),
                     "raw_output": obj,
                 })
             except json.JSONDecodeError:
@@ -724,11 +783,22 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | No
                 "description": f["description"],
                 "matched_at": f.get("matched_at", ""),
                 "proof": str(f.get("proof", ""))[:2000],
+                "evidence": f.get("evidence", ""),
                 "references": f.get("references", [])[:10],
                 "port": f.get("port"),
                 "tags": f.get("tags", []),
+                # HTTP Request/Response para reprodução
+                "http_request": f.get("http_request", ""),
+                "http_response": f.get("http_response", ""),
+                "curl_command": f.get("curl_command", ""),
+                # CVSS do scanner (quando disponível)
+                "cvss_vector": f.get("cvss_vector", ""),
+                "cvss_score": f.get("cvss_score", 0),
+                "cwe_id": f.get("cwe_id", []),
+                "cve_id": f.get("cve_id", []),
                 "raw_output": f.get("raw_output", {}),
                 "timestamp": datetime.utcnow(),
+                "status": "confirmed",
             }
             docs_to_insert.append(vuln_doc)
 
@@ -736,6 +806,9 @@ def _vuln_scan_ip(ip: str, scan_result_id: str | None = None, hostname: str | No
             vuln_col.insert_many(docs_to_insert)
             saved = len(docs_to_insert)
             _inc_stat("vulns_found", saved)
+
+    if all_findings:
+        _notify_vuln_findings(ip, hostname or "", all_findings)
 
     with _stats_lock:
         _vuln_stats["scanning"] = max(0, _vuln_stats["scanning"] - 1)

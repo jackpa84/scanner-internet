@@ -1,3 +1,4 @@
+import asyncio
 import os
 import time
 import threading
@@ -5,9 +6,11 @@ import logging
 import ipaddress
 import json
 import re
+from collections import deque
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -70,6 +73,7 @@ from app.report_processor import (
 from app.h1_submission import (
     submit_report_to_h1, batch_submit_reports,
     get_submission_stats, get_submission_queue,
+    start_h1_auto_submit,
 )
 from app.program_matcher import (
     match_ip_to_programs, build_ip_program_mapping,
@@ -86,7 +90,8 @@ from app.ai_analyzer import (
     AI_ENABLED as AI_ANALYZER_ENABLED,
     ai_write_report, ai_classify_finding, ai_classify_findings_batch,
     ai_analyze_response, ai_parse_scope, ai_analyze_javascript,
-    ai_find_vuln_chains, get_ai_stats,
+    ai_find_vuln_chains, get_ai_stats, get_ai_history,
+    ai_prioritize_targets, ai_generate_program_report,
 )
 from app.bounty_targets_data import (
     start_bounty_data_sync, sync_bounty_targets_data,
@@ -95,6 +100,13 @@ from app.bounty_targets_data import (
     get_all_bounty_domains,
 )
 from app.bug_scraper_integration import sync_bug_scraper_programs
+from app.platform_scrapers import (
+    start_platform_watcher, run_check as watcher_run_check,
+    run_check_single as watcher_run_single,
+    get_watcher_stats, get_configured_platforms,
+    get_cached_platform_programs, get_all_cached_programs,
+    ProgramFilter, SCRAPERS as PLATFORM_SCRAPERS,
+)
 from app.auth import AuthMiddleware, authenticate, AUTH_USERNAME
 
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -117,7 +129,84 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 
 logger = logging.getLogger("scanner")
 
+# ─── Activity Log Ring Buffer ────────────────────────────────────────────
+# In-memory deque holding the last N log entries for the live terminal feed.
+# Each entry: {"ts": ISO-8601, "level": str, "msg": str, "tag": str}
+_ACTIVITY_MAX = 500
+_activity_log: deque[dict] = deque(maxlen=_ACTIVITY_MAX)
+_activity_lock = threading.Lock()
+
+# Tags extracted from log messages for colour-coding in the frontend terminal
+_TAG_PATTERNS: list[tuple[str, str]] = [
+    ("VULN",     r"\bvuln|nuclei|nmap|finding|CVE-|cwe-|severity\b"),
+    ("SCAN",     r"\bscan|queue|enqueue|worker|scanning\b"),
+    ("RECON",    r"\brecon|subfinder|httpx|dnsx|crt\.sh|subdomain\b"),
+    ("REPORT",   r"\breport|h1_submit|hackerone|submission\b"),
+    ("BOUNTY",   r"\bbounty|program|scope|earning|paid\b"),
+    ("AI",       r"\bai_|ollama|classify|analyze\b"),
+    ("CT",       r"\bcertificate|ct_monitor|transparency\b"),
+    ("CVE",      r"\bcve_monitor|nvd|exploit\b"),
+    ("STARTUP",  r"\bstartup|pronta|ready|init\b"),
+    ("ERROR",    r"\berror|fail|exception|timeout\b"),
+]
+_TAG_REGEXES = [(tag, re.compile(pat, re.IGNORECASE)) for tag, pat in _TAG_PATTERNS]
+
+
+def _detect_tag(msg: str) -> str:
+    for tag, rx in _TAG_REGEXES:
+        if rx.search(msg):
+            return tag
+    return "SYSTEM"
+
+
+class ActivityLogHandler(logging.Handler):
+    """Captures scanner log records into the in-memory ring buffer."""
+    def emit(self, record: logging.LogRecord):
+        try:
+            msg = self.format(record)
+            tag = _detect_tag(msg)
+            entry = {
+                "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+                "level": record.levelname,
+                "msg": msg,
+                "tag": tag,
+            }
+            with _activity_lock:
+                _activity_log.append(entry)
+        except Exception:
+            pass
+
+
+# Attach the handler to the root "scanner" logger and also the root logger
+# so we capture output from all app modules.
+_activity_handler = ActivityLogHandler()
+_activity_handler.setLevel(logging.DEBUG)
+_activity_handler.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(_activity_handler)
+logging.getLogger().addHandler(_activity_handler)
+
 app = FastAPI(title="Scanner Internet API", version="2.0.0")
+
+# ─── H1 Rate Limiting ─────────────────────────────────────────────────────
+_h1_rate = {"count": 0, "window_start": 0.0, "batch_ts": 0.0}
+_H1_SUBMIT_LIMIT   = int(os.getenv("H1_SUBMIT_LIMIT", "10"))    # per minute
+_H1_BATCH_COOLDOWN = int(os.getenv("H1_BATCH_COOLDOWN", "300"))  # seconds
+
+
+def _check_h1_rate(batch: bool = False) -> None:
+    now = time.time()
+    if batch:
+        wait = _H1_BATCH_COOLDOWN - (now - _h1_rate["batch_ts"])
+        if wait > 0:
+            raise HTTPException(429, detail=f"Aguarde {int(wait)}s antes do próximo batch")
+        _h1_rate["batch_ts"] = now
+    else:
+        if now - _h1_rate["window_start"] > 60:
+            _h1_rate["count"] = 0
+            _h1_rate["window_start"] = now
+        if _h1_rate["count"] >= _H1_SUBMIT_LIMIT:
+            raise HTTPException(429, detail=f"Rate limit: max {_H1_SUBMIT_LIMIT} submissões/minuto")
+        _h1_rate["count"] += 1
 
 
 def _storage_error_handler(request, exc: Exception):
@@ -333,6 +422,51 @@ def api_health():
         "vuln_scanner": vuln_stats,
         "enrich_cache": enrich_cache_stats,
     }
+
+
+@app.get("/api/health/workers")
+def api_health_workers():
+    """Status de todos os workers em background."""
+    return {
+        "vuln_scanner":     get_vuln_scan_stats(),
+        "bounty_recon":     get_recon_stats(),
+        "program_scorer":   get_scorer_stats(),
+        "ai_analyzer":      get_ai_stats(),
+        "ct_monitor":       get_ct_stats(),
+        "cve_monitor":      get_cve_stats(),
+        "interactsh":       get_interactsh_stats(),
+        "platform_watcher": get_watcher_stats(),
+        "bounty_data":      get_bounty_data_stats(),
+        "program_matcher":  get_matcher_stats(),
+    }
+
+
+@app.get("/api/activity/logs")
+def api_activity_logs(
+    limit: int = Query(default=100, ge=1, le=500),
+    after: str | None = Query(default=None, description="Return only entries after this ISO timestamp"),
+    tag: str | None = Query(default=None, description="Filter by tag (VULN, SCAN, RECON, REPORT, etc.)"),
+):
+    """
+    Returns recent activity log entries from the in-memory ring buffer.
+    Used by the frontend terminal-style live feed.
+    """
+    with _activity_lock:
+        entries = list(_activity_log)
+
+    # Filter by tag
+    if tag:
+        tag_upper = tag.upper()
+        entries = [e for e in entries if e["tag"] == tag_upper]
+
+    # Filter by timestamp (only entries after the given ts)
+    if after:
+        entries = [e for e in entries if e["ts"] > after]
+
+    # Return last N, newest last (chronological order for terminal display)
+    entries = entries[-limit:]
+
+    return {"logs": entries, "total_buffered": len(_activity_log)}
 
 
 @app.get("/api/db/activity")
@@ -672,11 +806,12 @@ def api_h1_submit(report_id: str, body: dict | None = None):
         "dry_run": true (optional, validate without submitting)
       }
     """
+    _check_h1_rate()
     body = body or {}
     dry_run = body.get("dry_run", False)
-    
+
     result = submit_report_to_h1(report_id, dry_run=dry_run)
-    
+
     return result
 
 
@@ -692,11 +827,12 @@ def api_h1_batch_submit(body: dict | None = None):
         "dry_run": false (validate without submitting)
       }
     """
+    _check_h1_rate(batch=True)
     body = body or {}
     limit = body.get("limit", 10)
     auto_only = body.get("auto_only", False)
     dry_run = body.get("dry_run", False)
-    
+
     results = batch_submit_reports(limit=limit, auto_only=auto_only, dry_run=dry_run)
     
     return {
@@ -736,7 +872,53 @@ def api_h1_stats():
     """
     Get HackerOne submission statistics.
     """
-    return get_submission_stats()
+    stats = get_submission_stats()
+    from app.h1_submission import AUTO_SUBMIT_ENABLED, AUTO_SUBMIT_INTERVAL, AUTO_SUBMIT_BATCH, AUTO_SUBMIT_DRY_RUN
+    stats["auto_submit_config"] = {
+        "enabled": AUTO_SUBMIT_ENABLED,
+        "interval_seconds": AUTO_SUBMIT_INTERVAL,
+        "batch_size": AUTO_SUBMIT_BATCH,
+        "dry_run": AUTO_SUBMIT_DRY_RUN,
+    }
+    return stats
+
+
+@app.post("/api/h1/auto-submit-now")
+def api_h1_auto_submit_now(body: dict | None = None):
+    """
+    Force an immediate auto-submit cycle:
+      1. Generate reports from confirmed vulns
+      2. Submit ready reports to HackerOne
+    
+    Body (optional):
+      {
+        "limit": 10 (max reports to process),
+        "dry_run": false (validate without submitting)
+      }
+    """
+    from app.report_processor import process_vulnerabilities_to_reports
+    from app.h1_submission import AUTO_SUBMIT_BATCH
+
+    body = body or {}
+    limit = body.get("limit", AUTO_SUBMIT_BATCH)
+    dry_run = body.get("dry_run", False)
+
+    # Step 1: Generate reports
+    gen = process_vulnerabilities_to_reports(limit=limit * 5, severity_threshold="low")
+
+    # Step 2: Submit
+    sub = batch_submit_reports(limit=limit, auto_only=False, dry_run=dry_run)
+
+    return {
+        "status": "completed",
+        "reports_generated": gen["reports_generated"],
+        "processed_vulns": gen["processed_vulns"],
+        "submitted": sub["submitted"],
+        "duplicates": sub["duplicates"],
+        "errors": sub["errors"] + gen["errors"],
+        "skipped": sub["skipped"],
+        "details": sub["details"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1326,25 +1508,78 @@ def api_bounty_scope_suggest(body: dict):
     }
 
 
-@app.get("/api/bounty/programs")
-def api_bounty_list_programs():
+def _flow_step_from_data(program_doc, targets):
+    """Compute current flow step using pre-fetched data (no extra DB calls)."""
+    in_scope = program_doc.get("in_scope") or []
+    if isinstance(in_scope, str):
+        in_scope = [in_scope] if in_scope.strip() else []
+    has_scope = len(in_scope) > 0
+    has_name = bool((program_doc.get("name") or "").strip())
+    has_url = bool((program_doc.get("url") or "").strip())
+    step2_done = has_name and has_url and has_scope
+    has_recon = program_doc.get("last_recon") is not None
+    has_targets = len(targets) > 0
+    any_has_findings = False
+    any_ready = False
+    for t in targets:
+        findings = (t.get("recon_checks") or {}).get("findings") or []
+        if findings:
+            any_has_findings = True
+        for f in findings:
+            if (f.get("title") or "").strip() and (f.get("evidence") or "").strip():
+                any_ready = True
+                break
+        if any_ready:
+            break
+    step3_done = has_recon and has_targets and any_has_findings
+    done_list = [step2_done, step2_done, step3_done, step3_done, False, any_ready, False]
+    current = 1
+    for i, d in enumerate(done_list):
+        if not d:
+            current = i + 1
+            break
+    else:
+        current = 7
+    return current
+
+
+def _list_programs_sync():
+    from collections import defaultdict
     col = get_bounty_programs()
+    tcol = get_bounty_targets()
+    vcol = get_vuln_results()
+
+    # Load all targets and vulns once to avoid N×hgetall calls
+    all_targets = list(tcol.find())
+    all_vulns = list(vcol.find())
+
+    # Index targets by program_id
+    targets_by_program = defaultdict(list)
+    for t in all_targets:
+        pid = str(t.get("program_id", ""))
+        targets_by_program[pid].append(t)
+
+    # Index vulns by IP
+    vuln_ips = {v.get("ip") for v in all_vulns if v.get("ip")}
+
     programs = []
     for doc in col.find().sort("created_at", -1):
         d = _serialize_bounty_doc(doc)
-        tcol = get_bounty_targets()
-        d["target_count"] = tcol.count_documents({"program_id": doc["_id"]})
-        d["alive_count"] = tcol.count_documents({"program_id": doc["_id"], "alive": True})
-        vcol = get_vuln_results()
-        target_ips = set()
-        for t in tcol.find({"program_id": doc["_id"]}, {"ips": 1}):
-            for ip in t.get("ips", []):
-                target_ips.add(ip)
-        d["vuln_count"] = vcol.count_documents({"ip": {"$in": list(target_ips)}}) if target_ips else 0
-        flow = _compute_program_flow(str(doc["_id"]))
-        d["flow_step"] = flow.get("current_step", 1)
+        pid = str(doc["_id"])
+        prog_targets = targets_by_program.get(pid, [])
+        d["target_count"] = len(prog_targets)
+        d["alive_count"] = sum(1 for t in prog_targets if t.get("alive"))
+        target_ips = {ip for t in prog_targets for ip in t.get("ips", [])}
+        d["vuln_count"] = len(target_ips & vuln_ips)
+        d["flow_step"] = _flow_step_from_data(doc, prog_targets)
         programs.append(d)
     return programs
+
+
+@app.get("/api/bounty/programs")
+async def api_bounty_list_programs():
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _list_programs_sync)
 
 
 @app.delete("/api/bounty/programs/{program_id}")
@@ -1769,9 +2004,9 @@ def api_hackerone_me():
         raise HTTPException(status_code=502, detail=f"Request failed: {e!s}")
 
     if r.status_code == 401:
-        raise HTTPException(status_code=401, detail="Invalid HackerOne credentials (check HACKERONE_API_USERNAME and HACKERONE_API_TOKEN)")
+        raise HTTPException(status_code=502, detail="Invalid HackerOne credentials (check HACKERONE_API_USERNAME and HACKERONE_API_TOKEN)")
     if r.status_code == 403:
-        raise HTTPException(status_code=403, detail="Forbidden — your IP may be blocked or token lacks permissions")
+        raise HTTPException(status_code=502, detail="HackerOne forbidden — your IP may be blocked or token lacks permissions")
     if not r.ok:
         raise HTTPException(status_code=r.status_code, detail=f"HackerOne returned {r.status_code}: {r.text[:300]}")
 
@@ -1801,9 +2036,9 @@ def _hackerone_request(method: str, path: str, params: dict | None = None, json_
     except requests.RequestException as e:
         raise HTTPException(status_code=502, detail=f"HackerOne request failed: {e!s}")
     if r.status_code == 401:
-        raise HTTPException(status_code=401, detail="Invalid HackerOne credentials")
+        raise HTTPException(status_code=502, detail="Invalid HackerOne credentials (check HACKERONE_API_USERNAME and HACKERONE_API_TOKEN)")
     if r.status_code == 403:
-        raise HTTPException(status_code=403, detail="Forbidden (IP or token permissions)")
+        raise HTTPException(status_code=502, detail="HackerOne forbidden (IP blocked or token lacks permissions)")
     if r.status_code == 429:
         raise HTTPException(status_code=429, detail="HackerOne rate limit (600/min read, 25/20s write)")
     data = r.json() if r.content else {}
@@ -1899,7 +2134,237 @@ def api_scorer_stats():
     return get_scorer_stats()
 
 
-@app.post("/api/bounty/h1-discover")
+# ---------------------------------------------------------------------------
+# Platform Watcher (madmax-hunter scraping)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/watcher/status")
+def api_watcher_status():
+    """Get platform watcher status and stats."""
+    stats = get_watcher_stats()
+    platforms = get_configured_platforms()
+    return {
+        "stats": stats,
+        "platforms": platforms,
+        "available_scrapers": list(PLATFORM_SCRAPERS.keys()),
+    }
+
+
+@app.post("/api/watcher/check")
+def api_watcher_check(body: dict | None = None):
+    """
+    Trigger a full platform check.
+    Body (optional):
+      {
+        "platforms": ["hackerone", "bugcrowd"],
+        "bounty_only": false,
+        "keywords": [],
+        "min_bounty": 0
+      }
+    """
+    body = body or {}
+    platforms = body.get("platforms")
+    pf = ProgramFilter(
+        bounty_only=body.get("bounty_only", False),
+        keywords=body.get("keywords", []),
+        exclude_keywords=body.get("exclude_keywords", []),
+        min_bounty=body.get("min_bounty", 0),
+    )
+    results = watcher_run_check(platforms=platforms, program_filter=pf)
+    return {"results": results}
+
+
+@app.post("/api/watcher/check/{platform}")
+def api_watcher_check_single(platform: str):
+    """Trigger scraping on a single platform."""
+    if platform not in PLATFORM_SCRAPERS:
+        return {"error": f"Unknown platform: {platform}", "available": list(PLATFORM_SCRAPERS.keys())}
+    results = watcher_run_single(platform)
+    return {"results": results}
+
+
+@app.get("/api/watcher/programs")
+def api_watcher_programs(platform: str = ""):
+    """Get cached programs from last scrape."""
+    if platform:
+        programs = get_cached_platform_programs(platform)
+        return {"platform": platform, "count": len(programs), "programs": programs[:200]}
+    all_progs = get_all_cached_programs()
+    summary = {p: len(progs) for p, progs in all_progs.items()}
+    return {"platforms": summary, "total": sum(summary.values())}
+
+
+@app.get("/api/watcher/programs/{platform}")
+def api_watcher_programs_by_platform(platform: str, limit: int = 100):
+    """Get programs for a specific platform."""
+    programs = get_cached_platform_programs(platform)
+    return {
+        "platform": platform,
+        "count": len(programs),
+        "programs": programs[:limit],
+    }
+
+
+# ---------------------------------------------------------------------------
+# BugHunt — dedicated endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/bughunt/status")
+def api_bughunt_status():
+    """BugHunt scraper configuration status and platform info."""
+    from app.platform_scrapers import BUGHUNT_EMAIL, BUGHUNT_PASSWORD
+    capsolver = bool(os.getenv("CAPSOLVER_API_KEY", ""))
+    configured = bool(BUGHUNT_EMAIL and BUGHUNT_PASSWORD)
+    programs = get_cached_platform_programs("bughunt")
+
+    # Get watcher stats for bughunt
+    stats = get_watcher_stats()
+    bh_found = stats.get("programs_found", {}).get("bughunt", 0)
+
+    # Last check info from platforms
+    platforms = get_configured_platforms()
+    bh_platform = next((p for p in platforms if p.get("platform") == "bughunt"), {})
+
+    return {
+        "configured": configured,
+        "email_set": bool(BUGHUNT_EMAIL),
+        "password_set": bool(BUGHUNT_PASSWORD),
+        "capsolver_set": capsolver,
+        "programs_cached": len(programs),
+        "programs_found_total": bh_found,
+        "last_check": bh_platform.get("last_check"),
+        "last_error": bh_platform.get("last_error"),
+        "status": bh_platform.get("status", "unknown"),
+    }
+
+
+@app.post("/api/bughunt/test")
+def api_bughunt_test():
+    """Test BugHunt connection (login attempt)."""
+    from app.platform_scrapers import BUGHUNT_EMAIL, BUGHUNT_PASSWORD, BugHuntScraper
+    if not BUGHUNT_EMAIL or not BUGHUNT_PASSWORD:
+        return {"ok": False, "error": "Credenciais não configuradas. Defina BUGHUNT_EMAIL e BUGHUNT_PASSWORD no .env"}
+
+    scraper = BugHuntScraper()
+    token = scraper._login()
+    if token:
+        # Try fetching programs too
+        raw = scraper._fetch_programs(token)
+        return {
+            "ok": True,
+            "message": f"Login bem-sucedido! {len(raw)} programas encontrados na API.",
+            "programs_count": len(raw),
+        }
+    return {"ok": False, "error": "Login falhou. Verifique credenciais ou configure CAPSOLVER_API_KEY para resolver reCAPTCHA."}
+
+
+@app.post("/api/bughunt/scrape")
+def api_bughunt_scrape():
+    """Trigger BugHunt scrape (same as watcher/check/bughunt but returns richer data)."""
+    from app.platform_scrapers import BUGHUNT_EMAIL, BUGHUNT_PASSWORD
+    if not BUGHUNT_EMAIL or not BUGHUNT_PASSWORD:
+        return {"ok": False, "error": "Credenciais não configuradas", "programs": []}
+
+    results = watcher_run_single("bughunt")
+    bh = results.get("bughunt", {})
+    programs = get_cached_platform_programs("bughunt")
+
+    return {
+        "ok": bh.get("status") != "error",
+        "fetched": bh.get("programs", 0),
+        "new": bh.get("new", 0),
+        "error": bh.get("error"),
+        "programs": programs[:200],
+    }
+
+
+@app.get("/api/bughunt/programs")
+def api_bughunt_programs(limit: int = 200, bounty_only: bool = False, search: str = ""):
+    """Get BugHunt programs with optional filtering."""
+    programs = get_cached_platform_programs("bughunt")
+    if bounty_only:
+        programs = [p for p in programs if float(p.get("max_bounty", 0) or 0) > 0]
+    if search:
+        s = search.lower()
+        programs = [p for p in programs if s in (p.get("name", "") or "").lower()
+                    or s in (p.get("program_id", "") or "").lower()
+                    or any(s in sc.lower() for sc in (p.get("scope", []) or []))]
+    return {
+        "count": len(programs),
+        "programs": programs[:limit],
+    }
+
+
+# ---------------------------------------------------------------------------
+# BugHunt — AI-powered report generator
+# ---------------------------------------------------------------------------
+
+@app.post("/api/bughunt/ai/analyze-scope")
+def api_bughunt_ai_analyze_scope(body: dict):
+    """AI analysis of a BugHunt program's scope and attack surface."""
+    from app.ai_analyzer import ai_bughunt_analyze_scope, AI_ENABLED
+    if not AI_ENABLED:
+        return {"ok": False, "error": "AI não está habilitada. Configure AI_PROVIDER no .env (ollama/openai/anthropic)."}
+
+    program_id = body.get("program_id", "")
+    programs = get_cached_platform_programs("bughunt")
+    prog = next((p for p in programs if p.get("program_id") == program_id), None)
+    if not prog:
+        return {"ok": False, "error": f"Programa '{program_id}' não encontrado. Execute o scrape primeiro."}
+
+    result = ai_bughunt_analyze_scope(prog)
+    if not result:
+        return {"ok": False, "error": "Falha na análise AI. Verifique se o Ollama está rodando."}
+
+    return {"ok": True, "analysis": result}
+
+
+@app.post("/api/bughunt/ai/suggest-vulns")
+def api_bughunt_ai_suggest_vulns(body: dict):
+    """AI-powered vulnerability suggestions for a BugHunt program."""
+    from app.ai_analyzer import ai_bughunt_suggest_vulns, AI_ENABLED
+    if not AI_ENABLED:
+        return {"ok": False, "error": "AI não está habilitada. Configure AI_PROVIDER no .env."}
+
+    program_id = body.get("program_id", "")
+    programs = get_cached_platform_programs("bughunt")
+    prog = next((p for p in programs if p.get("program_id") == program_id), None)
+    if not prog:
+        return {"ok": False, "error": f"Programa '{program_id}' não encontrado."}
+
+    result = ai_bughunt_suggest_vulns(prog)
+    if not result:
+        return {"ok": False, "error": "Falha na geração de sugestões AI."}
+
+    return {"ok": True, "suggestions": result}
+
+
+@app.post("/api/bughunt/ai/generate-report")
+def api_bughunt_ai_generate_report(body: dict):
+    """Generate a professional BugHunt vulnerability report using AI."""
+    from app.ai_analyzer import ai_bughunt_write_report, AI_ENABLED
+    if not AI_ENABLED:
+        return {"ok": False, "error": "AI não está habilitada. Configure AI_PROVIDER no .env."}
+
+    program_id = body.get("program_id", "")
+    vuln_type = body.get("vuln_type", "")
+    details = body.get("details", "")
+
+    if not vuln_type:
+        return {"ok": False, "error": "Campo 'vuln_type' é obrigatório."}
+
+    programs = get_cached_platform_programs("bughunt")
+    prog = next((p for p in programs if p.get("program_id") == program_id), None)
+    if not prog:
+        return {"ok": False, "error": f"Programa '{program_id}' não encontrado."}
+
+    result = ai_bughunt_write_report(prog, vuln_type, details)
+    if not result:
+        return {"ok": False, "error": "Falha na geração do relatório AI."}
+
+    return {"ok": True, "report": result}
+
+
 def api_h1_discover_programs():
     """Discover and auto-import new HackerOne programs."""
     new_programs = fetch_new_h1_programs()
@@ -1930,6 +2395,7 @@ def api_scanner_stats():
         "scorer": get_scorer_stats(),
         "ai": get_ai_stats(),
         "bounty_data": get_bounty_data_stats(),
+        "platform_watcher": get_watcher_stats(),
     }
 
 
@@ -2089,10 +2555,29 @@ def api_bounty_data_stats():
 
 
 @app.get("/api/bounty-data/search")
-def api_bounty_data_search(q: str = "", platform: str = "", bounty_only: bool = False, limit: int = 50):
-    """Search programs from bounty-targets-data."""
-    from app.bounty import _serialize_bounty_doc  # noqa: F811
-    programs = btd_search(query=q, platform=platform, bounty_only=bounty_only, limit=limit)
+def api_bounty_data_search(
+    q: str = "",
+    platform: str = "",
+    bounty_only: bool = False,
+    limit: int = 50,
+    asset_type: str = "",
+    min_scope: int = 0,
+    has_wildcards: bool = False,
+    sort_by: str = "newest",
+    scope_changed: bool = False,
+):
+    """Search programs from bounty-targets-data with advanced filters."""
+    programs = btd_search(
+        query=q,
+        platform=platform,
+        bounty_only=bounty_only,
+        limit=limit,
+        asset_type=asset_type,
+        min_scope=min_scope,
+        has_wildcards=has_wildcards,
+        sort_by=sort_by,
+        scope_changed=scope_changed,
+    )
     results = []
     for p in programs:
         d = dict(p)
@@ -2101,7 +2586,28 @@ def api_bounty_data_search(q: str = "", platform: str = "", bounty_only: bool = 
             if k in d and hasattr(d[k], "isoformat"):
                 d[k] = d[k].isoformat()
         results.append(d)
-    return results
+
+    # Summary stats
+    platforms_found = {}
+    bounty_count = 0
+    wildcard_count = 0
+    for r in results:
+        plat = r.get("platform", "unknown")
+        platforms_found[plat] = platforms_found.get(plat, 0) + 1
+        if r.get("has_bounty"):
+            bounty_count += 1
+        if r.get("wildcard_count", 0) > 0:
+            wildcard_count += 1
+
+    return {
+        "results": results,
+        "total": len(results),
+        "summary": {
+            "platforms": platforms_found,
+            "with_bounty": bounty_count,
+            "with_wildcards": wildcard_count,
+        },
+    }
 
 
 @app.get("/api/bounty-data/domains")
@@ -2180,7 +2686,7 @@ def api_intigriti_program_detail(program_id: str):
 
 
 @app.get("/api/intigriti/activities")
-def api_intigriti_activities():[TRUNCATED]
+def api_intigriti_activities():
     """Get recent Intigriti program activities (scope changes, etc.)."""
     data = _intigriti_request("/program-activities")
     return data
@@ -2259,6 +2765,12 @@ def api_intigriti_import():
 def api_ai_stats():
     """Get AI analyzer stats and configuration."""
     return get_ai_stats()
+
+
+@app.get("/api/ai/history")
+def api_ai_history(limit: int = 50):
+    """Return recent AI operation history with results."""
+    return {"history": get_ai_history(min(limit, 200))}
 
 
 @app.post("/api/ai/classify-finding")
@@ -2376,6 +2888,132 @@ def api_ai_find_chains(target_id: str):
     return {"chains": chains or [], "findings_analyzed": len(findings)}
 
 
+@app.get("/api/bounty/programs/{program_id}/ai-analysis")
+def api_bounty_program_ai_analysis(program_id: str):
+    """Return AI-generated report and prioritized targets for a program."""
+    try:
+        oid = ObjectId(program_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid program id")
+
+    pcol = get_bounty_programs()
+    tcol = get_bounty_targets()
+
+    program = pcol.find_one({"_id": oid})
+    if not program:
+        raise HTTPException(status_code=404, detail="Program not found")
+
+    targets = list(tcol.find(
+        {"program_id": oid, "alive": True},
+        {"domain": 1, "ai_priority": 1, "ai_vuln_chains": 1,
+         "recon_checks.risk_score": 1, "recon_checks.total_findings": 1},
+    ))
+
+    priorities = sorted(
+        [
+            {
+                "domain": t.get("domain"),
+                "rank": (t.get("ai_priority") or {}).get("rank"),
+                "attack_angle": (t.get("ai_priority") or {}).get("attack_angle"),
+                "reasoning": (t.get("ai_priority") or {}).get("reasoning"),
+                "risk_score": (t.get("recon_checks") or {}).get("risk_score", 0),
+                "finding_count": (t.get("recon_checks") or {}).get("total_findings", 0),
+                "chain_count": len(t.get("ai_vuln_chains") or []),
+            }
+            for t in targets
+        ],
+        key=lambda x: x.get("rank") or 9999,
+    )
+
+    return {
+        "program_id": program_id,
+        "program_name": program.get("name"),
+        "ai_report": program.get("ai_report"),
+        "prioritized_targets": priorities,
+        "ai_ready": program.get("ai_report") is not None,
+    }
+
+
+@app.get("/api/bounty/targets/{target_id}/ai-analysis")
+def api_bounty_target_ai_analysis(target_id: str):
+    """Return AI analysis for a single target: enriched findings, chains, priority."""
+    try:
+        oid = ObjectId(target_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid target id")
+
+    tcol = get_bounty_targets()
+    target = tcol.find_one({"_id": oid})
+    if not target:
+        raise HTTPException(status_code=404, detail="Target not found")
+
+    findings = (target.get("recon_checks") or {}).get("findings", [])
+    enriched = [f for f in findings if f.get("ai_impact")]
+
+    return {
+        "target_id": target_id,
+        "domain": target.get("domain"),
+        "ai_priority": target.get("ai_priority"),
+        "ai_vuln_chains": target.get("ai_vuln_chains", []),
+        "enriched_findings": enriched,
+        "total_findings": len(findings),
+        "ai_findings_analyzed": target.get("ai_findings_analyzed", False),
+    }
+
+
+@app.post("/api/bounty/programs/{program_id}/ai-analyze")
+def api_bounty_trigger_ai_analysis(program_id: str):
+    """Manually trigger AI recon analysis for a program (non-blocking)."""
+    if not AI_ANALYZER_ENABLED:
+        raise HTTPException(status_code=503, detail="AI not configured. Set AI_PROVIDER + API key in .env")
+    try:
+        oid = ObjectId(program_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid program id")
+
+    pcol = get_bounty_programs()
+    program = pcol.find_one({"_id": oid})
+    if not program:
+        raise HTTPException(status_code=404, detail="Program not found")
+
+    from app.bounty import _ai_analyze_recon_results
+
+    threading.Thread(
+        target=_ai_analyze_recon_results,
+        args=(program_id, program.get("name", ""), dict(program)),
+        daemon=True,
+    ).start()
+
+    return {"status": "ai_analysis_started", "program_id": program_id}
+
+
+@app.get("/api/bounty/programs/{program_id}/ranked-targets")
+def api_bounty_ranked_targets(program_id: str, limit: int = 20):
+    """Return targets sorted by AI priority rank (fallback: risk_score)."""
+    try:
+        oid = ObjectId(program_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid program id")
+
+    tcol = get_bounty_targets()
+    targets = list(tcol.find(
+        {"program_id": oid, "alive": True},
+        {"domain": 1, "ai_priority": 1, "ai_vuln_chains": 1, "recon_checks": 1, "httpx": 1},
+    ))
+
+    def _sort_key(t):
+        rank = (t.get("ai_priority") or {}).get("rank")
+        if rank is not None:
+            return (0, rank)
+        risk = (t.get("recon_checks") or {}).get("risk_score", 0)
+        return (1, -risk)
+
+    targets.sort(key=_sort_key)
+    targets = targets[:max(1, min(limit, 100))]
+
+    return [_serialize_bounty_doc(t) for t in targets]
+
+
 def start_scanner_thread():
     t = threading.Thread(
         target=run_scanner,
@@ -2413,5 +3051,7 @@ def on_startup():
     start_cve_monitor()
     start_roi_tracker()
     start_bounty_data_sync()
+    start_platform_watcher()
     start_program_matcher_worker()
-    logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData + ProgramMatcher rodando")
+    start_h1_auto_submit()
+    logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData + PlatformWatcher + ProgramMatcher + H1AutoSubmit rodando")
