@@ -3,8 +3,7 @@ AI-powered analysis for bug bounty hunting.
 
 Supports multiple LLM providers:
   - OpenAI (GPT-4o, GPT-4o-mini)
-  - Anthropic (Claude 3.5 Sonnet)
-  - Ollama (local, free — llama3, mistral, etc.)
+  - Ollama (local, free — deepseek-r1, llama3, mistral, etc.)
 
 Use cases:
   1. Report Writer: professional H1 reports from raw findings
@@ -25,13 +24,13 @@ import requests
 
 logger = logging.getLogger("scanner.ai")
 
-AI_PROVIDER = os.getenv("AI_PROVIDER", "").strip().lower()
+AI_PROVIDER = os.getenv("AI_PROVIDER", "anthropic").strip().lower()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6").strip()
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434").strip()
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3").strip()
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").strip()
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:7b").strip()
 
 AI_ENABLED = AI_PROVIDER in ("openai", "anthropic", "ollama")
 AI_MAX_TOKENS = int(os.getenv("AI_MAX_TOKENS", "4000"))
@@ -205,6 +204,7 @@ def _call_openai(system: str, user: str, max_tokens: int) -> str | None:
     usage = data.get("usage", {})
     _stats["tokens_used"] += usage.get("total_tokens", 0)
     return data["choices"][0]["message"]["content"]
+
 
 
 def _call_anthropic(system: str, user: str, max_tokens: int) -> str | None:

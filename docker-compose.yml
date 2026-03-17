@@ -2,9 +2,40 @@
 # IMPORTANTE: Aumente o Docker Desktop para 16GB+ de RAM em:
 #   Docker Desktop → Settings → Resources → Memory → 16384 MB
 services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: scanner_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "5m"
+      OLLAMA_NUM_PARALLEL: "2"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        SERVER_PID=$$!
+        echo "[ollama] aguardando servidor..."
+        until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 1; done
+        echo "[ollama] servidor pronto. puxando modelo ${OLLAMA_MODEL:-deepseek-r1:7b}..."
+        ollama pull ${OLLAMA_MODEL:-deepseek-r1:7b}
+        echo "[ollama] modelo pronto."
+        wait $$SERVER_PID
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 120s
+    restart: unless-stopped
+    networks:
+      - scanner_net
+
   redis:
     image: redis:7-alpine
-    platform: linux/arm64
+    platform: linux/amd64
     container_name: scanner_redis
     ports:
       - "6379:6379"
@@ -52,10 +83,12 @@ services:
 
   app:
     build: .
-    platform: linux/arm64
+    platform: linux/amd64
     container_name: scanner_app
     depends_on:
       redis:
+        condition: service_healthy
+      ollama:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
@@ -165,12 +198,12 @@ services:
       INTIGRITI_API_TOKEN: "${INTIGRITI_API_TOKEN:-}"
 
       # --- AI Analyzer ---
-      AI_PROVIDER: "${AI_PROVIDER:-ollama}"
+      AI_PROVIDER: "${AI_PROVIDER:-anthropic}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
-      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-sonnet-4-20250514}"
-      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-sonnet-4-6}"
+      OLLAMA_URL: "http://ollama:11434"
       OLLAMA_MODEL: "${OLLAMA_MODEL:-deepseek-r1:7b}"
       AI_MAX_TOKENS: "${AI_MAX_TOKENS:-3000}"
       AI_TEMPERATURE: "${AI_TEMPERATURE:-0.1}"
@@ -180,7 +213,7 @@ services:
       BOUNTY_DATA_INTERVAL: "1800"
       BOUNTY_DATA_AUTO_IMPORT: "true"
       BOUNTY_DATA_MIN_BOUNTY: "0"
-      BOUNTY_DATA_PLATFORMS: "hackerone,bugcrowd,intigriti,yeswehack"
+      BOUNTY_DATA_PLATFORMS: "hackerone,intigriti,yeswehack"
 
       # --- Advanced scanners ---
       PROGRAM_SCORER_ENABLED: "true"
@@ -202,7 +235,7 @@ services:
       # --- Platform Watcher (madmax-hunter scraping) ---
       PLATFORM_WATCHER_ENABLED: "true"
       PLATFORM_WATCHER_INTERVAL: "1800"
-      PLATFORM_WATCHER_PLATFORMS: "hackerone,bugcrowd,intigriti,yeswehack,bughunt"
+      PLATFORM_WATCHER_PLATFORMS: "hackerone,intigriti,yeswehack,bughunt"
       BUGCROWD_API_TOKEN: "${BUGCROWD_API_TOKEN:-}"
       YESWEHACK_TOKEN: "${YESWEHACK_TOKEN:-}"
       BUGHUNT_EMAIL: "${BUGHUNT_EMAIL:-}"
@@ -249,7 +282,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
-    platform: linux/arm64
+    platform: linux/amd64
     container_name: scanner_frontend
     depends_on:
       app:
@@ -286,6 +319,7 @@ services:
 
 volumes:
   redis_data:
+  ollama_data:
 
 networks:
   scanner_net:
