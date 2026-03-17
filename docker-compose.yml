@@ -1,37 +1,32 @@
-# Otimizado para M4 Pro (12 cores, 24GB RAM)
-# IMPORTANTE: Aumente o Docker Desktop para 16GB+ de RAM em:
-#   Docker Desktop → Settings → Resources → Memory → 16384 MB
+# Modo alto desempenho — 90% da máquina local (12 CPUs / 22GB RAM)
 services:
-  ollama:
-    image: ollama/ollama:latest
-    container_name: scanner_ollama
+  mongo:
+    image: mongo:7
+    container_name: scanner_mongo
     ports:
-      - "11434:11434"
-    volumes:
-      - ollama_data:/root/.ollama
+      - "27017:27017"
     environment:
-      OLLAMA_KEEP_ALIVE: "5m"
-      OLLAMA_NUM_PARALLEL: "2"
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        ollama serve &
-        SERVER_PID=$$!
-        echo "[ollama] aguardando servidor..."
-        until curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; do sleep 1; done
-        echo "[ollama] servidor pronto. puxando modelo ${OLLAMA_MODEL:-deepseek-r1:7b}..."
-        ollama pull ${OLLAMA_MODEL:-deepseek-r1:7b}
-        echo "[ollama] modelo pronto."
-        wait $$SERVER_PID
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin@321
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:11434/api/tags"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
       interval: 10s
       timeout: 5s
-      retries: 30
-      start_period: 120s
-    restart: unless-stopped
+      retries: 10
+      start_period: 20s
     networks:
       - scanner_net
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 4g
+        reservations:
+          cpus: "0.5"
+          memory: 1g
 
   redis:
     image: redis:7-alpine
@@ -41,26 +36,13 @@ services:
       - "6379:6379"
     command: >
       redis-server
-      --maxmemory 2gb
+      --maxmemory 2048mb
       --maxmemory-policy allkeys-lru
-      --appendonly yes
-      --appendfsync everysec
-      --no-appendfsync-on-rewrite yes
-      --save 300 10
-      --save 60 10000
-      --tcp-backlog 8192
-      --hz 100
+      --appendonly no
+      --save ""
+      --tcp-backlog 2048
+      --hz 20
       --dynamic-hz yes
-      --lazyfree-lazy-eviction yes
-      --lazyfree-lazy-expire yes
-      --lazyfree-lazy-server-del yes
-      --lazyfree-lazy-user-del yes
-      --io-threads 8
-      --io-threads-do-reads yes
-      --activedefrag yes
-      --maxmemory-samples 10
-      --activerehashing yes
-      --lfu-decay-time 1
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -75,8 +57,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2.5g
+          cpus: "1.0"
+          memory: 2g
         reservations:
           cpus: "0.5"
           memory: 512m
@@ -88,7 +70,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      ollama:
+      mongo:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
@@ -119,104 +101,107 @@ services:
     env_file:
       - .env
     environment:
-      AUTH_USERNAME: "admin"
-      AUTH_PASSWORD: "scanner2026"
+      AUTH_USERNAME: "${AUTH_USERNAME:-admin}"
+      AUTH_PASSWORD: "${AUTH_PASSWORD:-scanner2026}"
       REDIS_URL: "redis://redis:6379/0"
+      MONGODB_URI: "mongodb://admin:admin%40321@mongo:27017/scanner?authSource=admin"
       FEED_ENABLED: "false"
-      LOG_LEVEL: "INFO"
-      NETWORK_SCANNER_ENABLED: "true"
+      LOG_LEVEL: "WARNING"
+      NETWORK_SCANNER_ENABLED: "false"
+      # --- Ferramentas desabilitadas (não instaladas no container) ---
+      HTTP_PORT_SCANNER_ENABLED: "false"
       PYTHONUNBUFFERED: "1"
       PYTHONOPTIMIZE: "2"
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONASYNCIODEBUG: "0"
       PYTHONWARNINGS: "ignore::DeprecationWarning"
-      MALLOC_ARENA_MAX: "2"
-      UV_THREADPOOL_SIZE: "64"
+      MALLOC_ARENA_MAX: "4"
+      UV_THREADPOOL_SIZE: "256"
 
-      # --- Network scanner (M4 Pro: 12 cores) ---
+      # --- Network scanner ---
       NUM_WORKERS: "500"
       SCAN_INTERVAL: "0"
-      PRESCAN_TIMEOUT: "0.12"
-      BATCH_SIZE: "1000"
-      BATCH_FLUSH_INTERVAL: "0.2"
-      MAX_CONCURRENT_CONNS: "80000"
+      PRESCAN_TIMEOUT: "0.3"
+      BATCH_SIZE: "500"
+      BATCH_FLUSH_INTERVAL: "0.3"
+      MAX_CONCURRENT_CONNS: "50000"
 
       # --- Enrichment ---
-      SHODAN_RPS: "25"
-      IPAPI_RPS: "5"
-      IPINFO_RPS: "5"
+      SHODAN_RPS: "5"
+      IPAPI_RPS: "2"
+      IPINFO_RPS: "2"
 
       # --- Masscan ---
-      MASSCAN_ENABLED: "auto"
-      MASSCAN_RATE: "300000"
+      MASSCAN_ENABLED: "false"
+      MASSCAN_RATE: "50000"
 
-      # --- Vuln scanner (M4 Pro: parallel) ---
-      VULN_WORKERS: "30"
+      # --- Vuln scanner ---
+      VULN_WORKERS: "20"
       VULN_AUTO_SCAN: "true"
-      VULN_AUTO_MIN_SCORE: "30"
-      NUCLEI_SEVERITY: "critical,high,medium"
-      NUCLEI_TIMEOUT: "90"
-      NUCLEI_RATE_LIMIT: "1200"
-      NUCLEI_BULK_SIZE: "200"
-      NUCLEI_CONCURRENCY: "100"
+      VULN_AUTO_MIN_SCORE: "70"
+      NUCLEI_SEVERITY: "critical,high"
+      NUCLEI_TIMEOUT: "60"
+      NUCLEI_RATE_LIMIT: "300"
+      NUCLEI_BULK_SIZE: "50"
+      NUCLEI_CONCURRENCY: "30"
+      NUCLEI_RETRIES: "2"
       NMAP_TIMEOUT: "60"
 
-      # --- Bounty recon (M4 Pro: max parallel) ---
+      # --- Bounty recon ---
       BOUNTY_MODE: "true"
-      BOUNTY_RECON_INTERVAL: "3600"
-      BOUNTY_RECON_WORKERS: "30"
-      SUBFINDER_TIMEOUT: "90"
-      HTTPX_TIMEOUT: "90"
-      HTTPX_THREADS: "250"
+      BOUNTY_RECON_INTERVAL: "7200"
+      BOUNTY_RECON_WORKERS: "20"
+      SUBFINDER_TIMEOUT: "60"
+      HTTPX_TIMEOUT: "45"
+      HTTPX_THREADS: "200"
 
       # --- HackerOne ---
       HACKERONE_API_USERNAME: "jackpa1984"
       HACKERONE_API_TOKEN: "${HACKERONE_API_TOKEN:-}"
       H1_API_TOKEN: "${HACKERONE_API_TOKEN:-}"
       H1_PROGRAM_HANDLE: "${H1_PROGRAM_HANDLE:-}"
-      H1_AUTO_SUBMIT: "true"
+      H1_AUTO_SUBMIT: "false"
       H1_AUTO_SUBMIT_INTERVAL: "300"
       H1_AUTO_SUBMIT_BATCH: "10"
-      H1_AUTO_SUBMIT_DRY_RUN: "${H1_DRY_RUN:-false}"
+      H1_AUTO_SUBMIT_DRY_RUN: "true"
 
       # --- Tools ---
       BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
       BUG_SCRAPER_ARGS: "--mode discovery --output json"
-      HTTP_PORT_SCANNER_ENABLED: "true"
       HTTP_PORT_SCANNER_PATH: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
 
       ABUSEIPDB_KEY: ""
       IPINFO_TOKEN: ""
 
-      # --- Tools (fast) ---
-      KATANA_TIMEOUT: "60"
+      # --- Tools ---
+      KATANA_TIMEOUT: "45"
       KATANA_DEPTH: "3"
-      KATANA_CONCURRENCY: "60"
+      KATANA_CONCURRENCY: "30"
       GAU_TIMEOUT: "30"
 
       # --- Intigriti ---
       INTIGRITI_API_TOKEN: "${INTIGRITI_API_TOKEN:-}"
 
       # --- AI Analyzer ---
-      AI_PROVIDER: "${AI_PROVIDER:-anthropic}"
+      AI_PROVIDER: "anthropic"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
-      ANTHROPIC_MODEL: "${ANTHROPIC_MODEL:-claude-sonnet-4-6}"
-      OLLAMA_URL: "http://ollama:11434"
-      OLLAMA_MODEL: "${OLLAMA_MODEL:-deepseek-r1:7b}"
-      AI_MAX_TOKENS: "${AI_MAX_TOKENS:-3000}"
-      AI_TEMPERATURE: "${AI_TEMPERATURE:-0.1}"
+      ANTHROPIC_MODEL: "claude-sonnet-4-6"
+      OLLAMA_URL: ""
+      OLLAMA_MODEL: ""
+      AI_MAX_TOKENS: "4000"
+      AI_TEMPERATURE: "0.1"
 
       # --- Bounty Targets Data ---
       BOUNTY_DATA_ENABLED: "true"
       BOUNTY_DATA_INTERVAL: "1800"
       BOUNTY_DATA_AUTO_IMPORT: "true"
-      BOUNTY_DATA_MIN_BOUNTY: "0"
+      BOUNTY_DATA_MIN_BOUNTY: "100"
       BOUNTY_DATA_PLATFORMS: "hackerone,intigriti,yeswehack"
 
       # --- Advanced scanners ---
-      PROGRAM_SCORER_ENABLED: "true"
+      PROGRAM_SCORER_ENABLED: "false"
       PROGRAM_SCORER_INTERVAL: "3600"
       H1_MONITOR_INTERVAL: "1800"
       IDOR_SCANNER_ENABLED: "true"
@@ -224,10 +209,10 @@ services:
       GRAPHQL_SCANNER_ENABLED: "true"
       RACE_SCANNER_ENABLED: "true"
       INTERACTSH_ENABLED: "true"
-      INTERACTSH_SERVER: "oast.fun"
+      INTERACTSH_SERVER: "interact.sh"
       CT_MONITOR_ENABLED: "true"
       CT_POLL_INTERVAL: "600"
-      CVE_MONITOR_ENABLED: "true"
+      CVE_MONITOR_ENABLED: "false"
       CVE_POLL_INTERVAL: "1800"
       ROI_TRACKER_ENABLED: "true"
       CUSTOM_NUCLEI_TEMPLATES: "/app/nuclei-custom-templates"
@@ -235,7 +220,7 @@ services:
       # --- Platform Watcher (madmax-hunter scraping) ---
       PLATFORM_WATCHER_ENABLED: "true"
       PLATFORM_WATCHER_INTERVAL: "1800"
-      PLATFORM_WATCHER_PLATFORMS: "hackerone,intigriti,yeswehack,bughunt"
+      PLATFORM_WATCHER_PLATFORMS: "hackerone,intigriti,yeswehack"
       BUGCROWD_API_TOKEN: "${BUGCROWD_API_TOKEN:-}"
       YESWEHACK_TOKEN: "${YESWEHACK_TOKEN:-}"
       BUGHUNT_EMAIL: "${BUGHUNT_EMAIL:-}"
@@ -256,11 +241,12 @@ services:
       - app.main:app
       - --host=0.0.0.0
       - --port=5000
+      - --workers=4
       - --loop=uvloop
-      - --log-level=info
+      - --log-level=warning
       - --timeout-keep-alive=120
       - --limit-concurrency=1000
-      - --backlog=8192
+      - --backlog=4096
       - --timeout-graceful-shutdown=10
     logging:
       driver: "json-file"
@@ -272,10 +258,10 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "11.0"
-          memory: 5g
+          cpus: "7.0"
+          memory: 12g
         reservations:
-          cpus: "6.0"
+          cpus: "2.0"
           memory: 2g
 
   frontend:
@@ -295,7 +281,7 @@ services:
       NODE_ENV: development
       WATCHPACK_POLLING: "true"
       CHOKIDAR_USEPOLLING: "true"
-      NODE_OPTIONS: "--max-old-space-size=1536"
+      NODE_OPTIONS: "--max-old-space-size=1024"
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -309,17 +295,17 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2g
-        reservations:
           cpus: "0.5"
-          memory: 512m
+          memory: 1g
+        reservations:
+          cpus: "0.2"
+          memory: 256m
     networks:
       - scanner_net
 
 volumes:
   redis_data:
-  ollama_data:
+  mongo_data:
 
 networks:
   scanner_net:

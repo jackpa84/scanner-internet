@@ -122,11 +122,11 @@ function Card({ children, className = "", title, accent, action, glow, onClick, 
   action?: ReactNode; glow?: string; onClick?: () => void; clickHint?: string;
 }) {
   return (
-    <div className={`rounded-xl border border-[var(--border)] bg-[var(--card)] p-3 card-glow h-full ${onClick ? 'cursor-pointer hover:border-[var(--accent)]/30 transition-all duration-200 group/card' : ''} ${className}`}
+    <div className={`rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 card-glow h-full ${onClick ? 'cursor-pointer hover:border-[var(--accent)]/30 transition-all duration-200 group/card' : ''} ${className}`}
       style={glow ? { boxShadow: `inset 0 1px 0 0 ${glow}` } : undefined}
       onClick={onClick}>
       {title && (
-        <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center justify-between mb-3">
           <h3 className={`text-xs font-semibold uppercase tracking-wider ${accent || "text-[var(--muted)]"}`}>{title}</h3>
           <div className="flex items-center gap-2">
             {action}
@@ -529,85 +529,81 @@ export default function Home() {
             </div>
 
             {/* Pipeline Steps */}
-            <div className="relative px-4 sm:px-6 py-5 sm:py-6">
-              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-x-0 gap-y-4 sm:gap-y-5">
-                {[
-                  { n: 1, icon: "📋", label: "Programas", desc: "H1, Bugcrowd, Intigriti", val: bounty?.programs ?? 0, color: "indigo" },
-                  { n: 2, icon: "🔍", label: "Recon", desc: "subfinder, crt.sh, httpx", val: recon?.recons_completed ?? 0, color: "cyan" },
-                  { n: 3, icon: "🎯", label: "Targets", desc: "Hosts vivos para scan", val: bounty?.alive_targets ?? 0, color: "teal" },
-                  { n: 4, icon: "⚡", label: "Scan", desc: "Nuclei, Nmap, SQLi...", val: vuln?.total_vulns ?? 0, color: "amber" },
-                  { n: 5, icon: "📝", label: "Reports", desc: "PoC + CVSS + Steps", val: reportStats?.total ?? 0, color: "violet" },
-                  { n: 6, icon: "📤", label: "Enviados", desc: "Submit via API", val: reportStats?.submitted ?? 0, color: "blue" },
-                  { n: 7, icon: "✅", label: "Aceitos", desc: "Triaged pelo programa", val: roi?.operations.reports_accepted ?? 0, color: "emerald" },
-                  { n: 8, icon: "💰", label: "Bounty", desc: "Recompensa paga", val: roi?.summary.total_earnings ?? 0, color: "green", isMoney: true },
-                ].map((s, i) => {
-                  const active = s.isMoney ? (s.val as number) > 0 : (s.val as number) > 0;
-                  const colorMap: Record<string, { ring: string; bg: string; text: string; glow: string }> = {
-                    indigo:  { ring: "ring-indigo-500/40", bg: "bg-indigo-500/15", text: "text-indigo-400", glow: "shadow-indigo-500/20" },
-                    cyan:    { ring: "ring-cyan-500/40",   bg: "bg-cyan-500/15",   text: "text-cyan-400",   glow: "shadow-cyan-500/20" },
-                    teal:    { ring: "ring-teal-500/40",   bg: "bg-teal-500/15",   text: "text-teal-400",   glow: "shadow-teal-500/20" },
-                    amber:   { ring: "ring-amber-500/40",  bg: "bg-amber-500/15",  text: "text-amber-400",  glow: "shadow-amber-500/20" },
-                    violet:  { ring: "ring-violet-500/40", bg: "bg-violet-500/15", text: "text-violet-400", glow: "shadow-violet-500/20" },
-                    blue:    { ring: "ring-blue-500/40",   bg: "bg-blue-500/15",   text: "text-blue-400",   glow: "shadow-blue-500/20" },
-                    emerald: { ring: "ring-emerald-500/40",bg: "bg-emerald-500/15",text: "text-emerald-400",glow: "shadow-emerald-500/20" },
-                    green:   { ring: "ring-green-500/40",  bg: "bg-green-500/15",  text: "text-green-400",  glow: "shadow-green-500/20" },
-                  };
-                  const c = colorMap[s.color] ?? colorMap.indigo;
-                  return (
-                    <div key={s.n} className="flex items-center relative group">
-                      {/* Glow effect background */}
-                      {active && (
-                        <div className={`absolute -inset-4 rounded-3xl opacity-0 group-hover:opacity-100 transition-opacity duration-500 blur-2xl pointer-events-none
-                          ${s.color === 'indigo' ? 'bg-indigo-500/20' :
-                            s.color === 'cyan' ? 'bg-cyan-500/20' :
-                            s.color === 'teal' ? 'bg-teal-500/20' :
-                            s.color === 'amber' ? 'bg-amber-500/20' :
-                            s.color === 'violet' ? 'bg-violet-500/20' :
-                            s.color === 'blue' ? 'bg-blue-500/20' :
-                            s.color === 'emerald' ? 'bg-emerald-500/20' :
-                            'bg-green-500/20'}`}
-                        />
-                      )}
-                      {/* Step card */}
-                      <div className="flex-1 flex flex-col items-center text-center relative z-10">
-                        {/* Circle with value */}
-                        <div className={`relative w-14 h-14 sm:w-16 sm:h-16 rounded-2xl flex items-center justify-center ring-2 transition-all backdrop-blur-md
-                          ${active
-                            ? `${c.ring} ${c.bg} shadow-2xl ${c.glow} border border-${s.color}-400/50 group-hover:shadow-lg group-hover:scale-110 group-hover:backdrop-blur-lg`
-                            : "ring-white/10 bg-gradient-to-br from-white/8 to-white/3 border border-white/10 group-hover:from-white/12 group-hover:to-white/5"
-                          } before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:pointer-events-none ${
-                            active ? `before:from-${s.color}-400/10 before:to-transparent` : 'before:from-white/5 before:to-transparent'
-                          }`}>
-                          <span className={`text-xs sm:text-sm font-bold tabular-nums transition-colors ${active ? c.text : "text-[var(--muted)]"}`}>
-                            {s.isMoney ? `$${(s.val as number).toLocaleString()}` : (s.val as number).toLocaleString()}
-                          </span>
-                          {/* Step number badge */}
-                          <span className={`absolute -top-2 -right-2 w-5 h-5 sm:w-6 sm:h-6 rounded-full text-[8px] sm:text-[9px] font-bold flex items-center justify-center transition-all duration-300 shadow-lg
-                            ${active
-                              ? "bg-gradient-to-br from-emerald-400 to-emerald-600 text-white shadow-emerald-500/50 border border-emerald-300/60 group-hover:shadow-emerald-500/70 group-hover:scale-125"
-                              : "bg-gradient-to-br from-white/20 to-white/5 text-[var(--muted)] border border-white/20 group-hover:from-white/30 group-hover:to-white/10"
-                            }`}>{active ? "✓" : s.n}</span>
+            <div className="relative px-4 sm:px-6 py-6 sm:py-8">
+              {(function () {
+                const pipelineVals = [
+                  bounty?.programs ?? 0,
+                  recon?.recons_completed ?? 0,
+                  bounty?.alive_targets ?? 0,
+                  vuln?.total_vulns ?? 0,
+                  reportStats?.total ?? 0,
+                  reportStats?.submitted ?? 0,
+                  roi?.operations.reports_accepted ?? 0,
+                  roi?.summary.total_earnings ?? 0,
+                ];
+                const pipelineMax = Math.max(...pipelineVals, 1);
+                const steps = [
+                  { n: 1, icon: "📋", label: "Programas", desc: "H1, Bugcrowd, Intigriti", val: pipelineVals[0], color: "indigo",  barCls: "bg-indigo-500",  ringCls: "ring-indigo-500/50",  bgCls: "bg-indigo-500/20",  textCls: "text-indigo-300" },
+                  { n: 2, icon: "🔍", label: "Recon",     desc: "subfinder, crt.sh, httpx",val: pipelineVals[1], color: "cyan",    barCls: "bg-cyan-500",    ringCls: "ring-cyan-500/50",    bgCls: "bg-cyan-500/20",    textCls: "text-cyan-300"   },
+                  { n: 3, icon: "🎯", label: "Targets",   desc: "Hosts vivos para scan",   val: pipelineVals[2], color: "teal",   barCls: "bg-teal-500",    ringCls: "ring-teal-500/50",    bgCls: "bg-teal-500/20",    textCls: "text-teal-300"   },
+                  { n: 4, icon: "⚡", label: "Scan",      desc: "Nuclei, Nmap, SQLi...",   val: pipelineVals[3], color: "amber",  barCls: "bg-amber-500",   ringCls: "ring-amber-500/50",   bgCls: "bg-amber-500/20",   textCls: "text-amber-300"  },
+                  { n: 5, icon: "📝", label: "Reports",   desc: "PoC + CVSS + Steps",      val: pipelineVals[4], color: "violet", barCls: "bg-violet-500",  ringCls: "ring-violet-500/50",  bgCls: "bg-violet-500/20",  textCls: "text-violet-300" },
+                  { n: 6, icon: "📤", label: "Enviados",  desc: "Submit via API",           val: pipelineVals[5], color: "blue",   barCls: "bg-blue-500",    ringCls: "ring-blue-500/50",    bgCls: "bg-blue-500/20",    textCls: "text-blue-300"   },
+                  { n: 7, icon: "✅", label: "Aceitos",   desc: "Triaged pelo programa",    val: pipelineVals[6], color: "emerald",barCls: "bg-emerald-500", ringCls: "ring-emerald-500/50", bgCls: "bg-emerald-500/20", textCls: "text-emerald-300"},
+                  { n: 8, icon: "💰", label: "Bounty",    desc: "Recompensa paga",          val: pipelineVals[7], color: "green",  barCls: "bg-green-500",   ringCls: "ring-green-500/50",   bgCls: "bg-green-500/20",   textCls: "text-green-300", isMoney: true },
+                ];
+                return (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-x-0 gap-y-6 sm:gap-y-5">
+                    {steps.map((s, i) => {
+                      const active = (s.val as number) > 0;
+                      const barPct = Math.max((s.val as number) / pipelineMax * 100, active ? 4 : 0);
+                      return (
+                        <div key={s.n} className="flex items-center relative group">
+                          <div className="flex-1 flex flex-col items-center text-center relative z-10 gap-2">
+                            {/* Circle */}
+                            <div className={`relative w-16 h-16 sm:w-[72px] sm:h-[72px] rounded-2xl flex flex-col items-center justify-center ring-2 transition-all duration-300
+                              ${active
+                                ? `${s.ringCls} ${s.bgCls} shadow-lg group-hover:scale-110`
+                                : "ring-white/10 bg-white/5 group-hover:bg-white/8"
+                              }`}>
+                              <span className="text-xl sm:text-2xl mb-0.5">{s.icon}</span>
+                              <span className={`text-[11px] sm:text-xs font-bold tabular-nums ${active ? s.textCls : "text-[var(--muted)]"}`}>
+                                {s.isMoney ? `$${(s.val as number).toLocaleString()}` : (s.val as number).toLocaleString()}
+                              </span>
+                              {/* Step badge */}
+                              <span className={`absolute -top-2 -right-2 w-5 h-5 rounded-full text-[9px] font-bold flex items-center justify-center shadow-md
+                                ${active
+                                  ? "bg-emerald-500 text-white border border-emerald-300/50"
+                                  : "bg-white/10 text-[var(--muted)] border border-white/15"
+                                }`}>{active ? "✓" : s.n}
+                              </span>
+                            </div>
+                            {/* Label */}
+                            <span className={`text-[11px] sm:text-xs font-semibold ${active ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>{s.label}</span>
+                            {/* Progress bar */}
+                            <div className="w-full h-2 rounded-full bg-white/5 overflow-hidden">
+                              <div
+                                className={`h-full rounded-full transition-all duration-700 ${active ? s.barCls : "bg-white/10"}`}
+                                style={{ width: `${barPct}%` }}
+                              />
+                            </div>
+                            {/* Desc */}
+                            <span className="text-[9px] text-[var(--muted)] leading-tight max-w-[72px]">{s.desc}</span>
+                          </div>
+                          {/* Arrow */}
+                          {i < 7 && (
+                            <div className="hidden lg:flex items-center shrink-0 -mx-1 pb-10">
+                              <svg width="18" height="8" viewBox="0 0 18 8" className="text-white/15">
+                                <path d="M0 4h14m0 0l-3-2.5m3 2.5l-3 2.5" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            </div>
+                          )}
                         </div>
-                        {/* Icon + Label */}
-                        <div className="mt-3 flex items-center gap-1.5 relative z-20">
-                          <span className="text-sm sm:text-base group-hover:scale-125 transition-transform duration-300">{s.icon}</span>
-                          <span className={`text-[10px] sm:text-xs font-bold transition-colors duration-300 ${active ? "text-[var(--foreground)] group-hover:text-${s.color}-300" : "text-[var(--muted)] group-hover:text-white/60"}`}>{s.label}</span>
-                        </div>
-                        {/* Description */}
-                        <span className="text-[8px] sm:text-[9px] text-[var(--muted)] mt-1.5 leading-tight max-w-[60px] sm:max-w-[70px] group-hover:text-[var(--foreground)]/70 transition-colors duration-300">{s.desc}</span>
-                      </div>
-                      {/* Arrow connector */}
-                      {i < 7 && (
-                        <div className="hidden lg:flex items-center shrink-0 -mx-1 group/arrow">
-                          <svg width="20" height="10" viewBox="0 0 20 10" className="text-white/15 group-hover/arrow:text-white/40 transition-all duration-300 group-hover/arrow:translate-x-1">
-                            <path d="M0 5h16m0 0l-3-3m3 3l-3 3" stroke="currentColor" strokeWidth="1.2" fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+                      );
+                    })}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Flow summary bar */}
@@ -630,356 +626,199 @@ export default function Home() {
               ))}
             </div>
 
-            {/* Success Rate Waterfall Chart */}
-            <div className="relative px-6 py-8 rounded-xl border border-white/10 bg-gradient-to-br from-emerald-500/5 via-cyan-500/3 to-blue-500/5 backdrop-blur-md overflow-hidden">
-              {/* Background glow */}
-              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-emerald-500/20 blur-3xl pointer-events-none" />
-              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-cyan-500/10 blur-3xl pointer-events-none" />
-              
-              <div className="relative z-10">
-                {/* Header */}
-                <div className="mb-8">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-base font-bold text-[var(--foreground)] flex items-center gap-2">
-                        <span>🏆 Trilha do Sucesso</span>
-                      </h3>
-                      <div className="px-2 py-1 rounded-md bg-emerald-500/20 border border-emerald-500/30">
-                        <span className="text-[10px] font-bold text-emerald-300">Jornada Completa</span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-xs font-semibold text-green-400">
-💰 ${((roi?.summary.total_earnings ?? 0) / Math.max(roi?.operations.reports_accepted ?? 1, 1)).toLocaleString(undefined, {maximumFractionDigits: 0})} por aceitação
-                      </div>
-                    </div>
+            {/* Trilha do Sucesso */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+              {/* Header */}
+              <div className="px-6 py-5 border-b border-white/10 flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-base">🏆</div>
+                  <div>
+                    <span className="text-sm font-bold text-[var(--foreground)]">Trilha do Sucesso</span>
+                    <p className="text-[10px] text-[var(--muted)] mt-0.5">Progresso da jornada completa</p>
                   </div>
-                  <p className="text-[11px] text-[var(--muted)]">
-                    Acompanhe seu progresso desde descoberta de programas até recebimento de recompensas. Cada etapa traz você mais perto de ganhos reais.
-                  </p>
+                  <span className="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                    Jornada Completa
+                  </span>
                 </div>
+                {(roi?.summary.total_earnings ?? 0) > 0 && (
+                  <div className="text-right">
+                    <div className="text-base font-bold text-emerald-400">
+                      ${((roi?.summary.total_earnings ?? 0) / Math.max(roi?.operations.reports_accepted ?? 1, 1)).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                    </div>
+                    <div className="text-[9px] text-[var(--muted)]">por aceitação</div>
+                  </div>
+                )}
+              </div>
 
-                {/* Success Journey Timeline - Enhanced */}
-                <div className="relative mt-8">
-                  {/* Connection line */}
-                  <div className="absolute top-1/2 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-emerald-500/50 to-transparent transform -translate-y-1/2 pointer-events-none" />
-                  
-                  {/* Timeline nodes with detailed info */}
-                  <div className="grid grid-cols-7 gap-1 sm:gap-2 relative">
-                    {[
-                      { 
-                        icon: "📋", 
-                        label: "Programas", 
-                        val: bounty?.programs ?? 0, 
-                        color: "indigo",
-                        colorClass: "indigo-400",
-                        description: "Plataformas descobertas (H1, Bugcrowd, Intigriti)",
-                        tip: "Quantidade de programas de bug bounty registrados no sistema"
-                      },
-                      { 
-                        icon: "🔍", 
-                        label: "Recon", 
-                        val: recon?.recons_completed ?? 0, 
-                        color: "cyan",
-                        colorClass: "cyan-400",
-                        description: "Reconhecimentos completados",
-                        tip: "Quantos programas foram submetidos a reconhecimento (subfinder, httpx, etc)"
-                      },
-                      { 
-                        icon: "🎯", 
-                        label: "Targets", 
-                        val: bounty?.alive_targets ?? 0, 
-                        color: "teal",
-                        colorClass: "teal-400",
-                        description: "Hosts vivos identificados",
-                        tip: "Quantidade de domínios/IPs ativos que passaram no teste de conectividade"
-                      },
-                      { 
-                        icon: "⚡", 
-                        label: "Scans", 
-                        val: vuln?.total_vulns ?? 0, 
-                        color: "amber",
-                        colorClass: "amber-400",
-                        description: "Vulnerabilidades encontradas",
-                        tip: "Total de vulnerabilidades descobertas (críticas, altas, médias através de Nuclei, Nmap, etc)"
-                      },
-                      { 
-                        icon: "📝", 
-                        label: "Reports", 
-                        val: reportStats?.total ?? 0, 
-                        color: "violet",
-                        colorClass: "violet-400",
-                        description: "Relatórios criados",
-                        tip: "Quantidade de POCs com CVSS e instruções de reprodução prontos para envio"
-                      },
-                      { 
-                        icon: "📤", 
-                        label: "Enviados", 
-                        val: reportStats?.submitted ?? 0, 
-                        color: "blue",
-                        colorClass: "blue-400",
-                        description: "Submissions completados",
-                        tip: "Relatórios que foram enviados com sucesso à plataforma"
-                      },
-                      { 
-                        icon: "✅", 
-                        label: "Aceitos", 
-                        val: roi?.operations.reports_accepted ?? 0, 
-                        color: "emerald",
-                        colorClass: "emerald-400",
-                        description: "Vulnerabilidades validadas",
-                        tip: "Relatórios que foram triados e aceitos - elegíveis para recompensa"
-                      },
-                    ].map((step, idx) => {
-                      const isActive = (step.val as number) > 0;
-                      const nextVal = idx < 6 ? ([
-                        bounty?.programs ?? 0,
-                        recon?.recons_completed ?? 0,
-                        bounty?.alive_targets ?? 0,
-                        vuln?.total_vulns ?? 0,
-                        reportStats?.total ?? 0,
-                        reportStats?.submitted ?? 0,
-                        roi?.operations.reports_accepted ?? 0,
-                      ][idx + 1] ?? 0) : 0;
-                      const conversionRate = ((nextVal as number) / Math.max((step.val as number), 1)) * 100;
-                      
-                      return (
-                        <div key={idx} className="flex flex-col items-center group relative">
-                          {/* Conversion rate indicator */}
-                          {idx < 6 && (step.val as number) > 0 && (
-                            <div className={`text-center mb-1 h-5 flex items-center justify-center`}>
-                              <div className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full 
-                                ${conversionRate >= 50 ? 'bg-emerald-500/20 text-emerald-300' :
-                                  conversionRate >= 20 ? 'bg-amber-500/20 text-amber-300' :
-                                  'bg-red-500/20 text-red-300'
-                                }`}>
-                                {Math.round(conversionRate)}%
-                              </div>
-                            </div>
-                          )}
+              {/* Funnel steps */}
+              <div className="px-6 py-4 space-y-1">
+                {(function () {
+                  const stepData = [
+                    { icon: "📋", label: "Programas", val: bounty?.programs ?? 0,               bar: "bg-indigo-500",  text: "text-indigo-400",  bg: "bg-indigo-500/10" },
+                    { icon: "🔍", label: "Recon",     val: recon?.recons_completed ?? 0,        bar: "bg-cyan-500",    text: "text-cyan-400",    bg: "bg-cyan-500/10"   },
+                    { icon: "🎯", label: "Targets",   val: bounty?.alive_targets ?? 0,          bar: "bg-teal-500",    text: "text-teal-400",    bg: "bg-teal-500/10"   },
+                    { icon: "⚡", label: "Scans",     val: vuln?.total_vulns ?? 0,              bar: "bg-amber-500",   text: "text-amber-400",   bg: "bg-amber-500/10"  },
+                    { icon: "📝", label: "Reports",   val: reportStats?.total ?? 0,             bar: "bg-violet-500",  text: "text-violet-400",  bg: "bg-violet-500/10" },
+                    { icon: "📤", label: "Enviados",  val: reportStats?.submitted ?? 0,         bar: "bg-blue-500",    text: "text-blue-400",    bg: "bg-blue-500/10"   },
+                    { icon: "✅", label: "Aceitos",   val: roi?.operations.reports_accepted ?? 0,bar: "bg-emerald-500", text: "text-emerald-400", bg: "bg-emerald-500/10"},
+                  ];
+                  const maxVal = Math.max(...stepData.map(s => s.val), 1);
 
-                          {/* Counter above */}
-                          <div className={`text-center mb-2 h-6 flex items-center justify-center transition-all duration-300 
-                            ${isActive 
-                              ? `font-bold text-sm text-${step.colorClass}` 
-                              : 'text-[10px] text-[var(--muted)]'
-                            }`}>
-                            {(step.val as number).toLocaleString()}
-                          </div>
+                  return stepData.map((step, idx) => {
+                    const barPct = Math.max((step.val / maxVal) * 100, step.val > 0 ? 2 : 0);
+                    const nextVal = idx < 6 ? stepData[idx + 1].val : null;
+                    const conv = nextVal !== null && step.val > 0 ? Math.round((nextVal / step.val) * 100) : null;
 
-                          {/* Tooltip on hover */}
-                          <div className="absolute -top-16 left-1/2 transform -translate-x-1/2 opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-200 z-20">
-                            <div className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 whitespace-nowrap text-[8px] text-white">
-                              {step.tip}
-                            </div>
-                          </div>
-
-                          {/* Circle node */}
-                          <div className={`relative w-11 h-11 sm:w-13 sm:h-13 rounded-full flex items-center justify-center transition-all duration-300 cursor-pointer group-hover:scale-110
-                            ${isActive
-                              ? `bg-gradient-to-br from-${step.color}-500/40 to-${step.color}-600/20 border-2 border-${step.color}-400/60 shadow-lg shadow-${step.color}-500/30`
-                              : 'bg-white/5 border-2 border-white/15 group-hover:border-white/30'
-                            }`}
-                          >
-                            {/* Inner glow */}
-                            {isActive && (
-                              <div className={`absolute inset-0 rounded-full bg-gradient-to-br from-${step.color}-500/30 to-transparent animate-pulse opacity-50`} />
-                            )}
-                            
-                            {/* Icon */}
-                            <span className={`text-lg relative z-10 transition-transform duration-300 ${isActive ? 'group-hover:scale-125' : 'group-hover:scale-110'}`}>
-                              {step.icon}
+                    return (
+                      <div key={idx}>
+                        {/* Row */}
+                        <div className={`flex items-center gap-4 py-2.5 px-3 rounded-lg transition-colors ${step.val > 0 ? `hover:${step.bg}` : "hover:bg-white/3"}`}>
+                          {/* Step info */}
+                          <div className="flex items-center gap-2.5 w-36 shrink-0">
+                            <span className="text-[10px] font-bold text-[var(--muted)] w-4 text-right tabular-nums">{idx + 1}</span>
+                            <span className="text-base leading-none">{step.icon}</span>
+                            <span className={`text-xs font-semibold truncate ${step.val > 0 ? "text-[var(--foreground)]" : "text-[var(--muted)]"}`}>
+                              {step.label}
                             </span>
-
-                            {/* Active indicator */}
-                            {isActive && (
-                              <div className="absolute -top-1 -right-1 w-3 h-3 bg-gradient-to-br from-emerald-400 to-green-500 rounded-full border border-emerald-300 shadow-md shadow-emerald-500/50 animate-pulse" />
-                            )}
                           </div>
-
-                          {/* Label below */}
-                          <div className={`text-center mt-2 text-[9px] font-semibold transition-all duration-300
-                            ${isActive 
-                              ? 'text-[var(--foreground)]' 
-                              : 'text-[var(--muted)] group-hover:text-white/60'
-                            }`}>
-                            {step.label}
+                          {/* Bar */}
+                          <div className="flex-1 h-3 bg-white/5 rounded-full overflow-hidden border border-white/5">
+                            <div
+                              className={`h-full ${step.bar} rounded-full transition-all duration-700 opacity-80`}
+                              style={{ width: `${barPct}%` }}
+                            />
                           </div>
+                          {/* Value */}
+                          <span className={`text-sm font-bold w-14 text-right tabular-nums ${step.val > 0 ? step.text : "text-[var(--muted)]"}`}>
+                            {step.val.toLocaleString()}
+                          </span>
+                        </div>
 
-                          {/* Description on hover */}
-                          <div className="absolute top-32 left-1/2 transform -translate-x-1/2 opacity-0 group-hover:opacity-100 pointer-events-none transition-all duration-200 z-20 max-w-[90px]">
-                            <div className="bg-slate-900/95 border border-slate-700 rounded-lg px-2 py-1.5 text-center whitespace-normal text-[8px] text-gray-300">
-                              {step.description}
+                        {/* Conversion arrow */}
+                        {idx < 6 && (
+                          <div className="flex items-center gap-4 h-5 pl-3">
+                            <div className="w-36 shrink-0" />
+                            <div className="pl-9 flex items-center gap-2">
+                              <div className="w-px h-5 bg-white/8" />
+                              {conv !== null && (
+                                <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-full ${
+                                  conv >= 50 ? "bg-emerald-500/15 text-emerald-400" :
+                                  conv >= 20 ? "bg-amber-500/15 text-amber-400" :
+                                  "bg-red-500/15 text-red-400"
+                                }`}>
+                                  {conv}% →
+                                </span>
+                              )}
                             </div>
                           </div>
+                        )}
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+
+              {/* Footer metrics */}
+              <div className="px-6 py-4 border-t border-white/10">
+                {(function () {
+                  const vals = [
+                    bounty?.programs ?? 0, recon?.recons_completed ?? 0,
+                    bounty?.alive_targets ?? 0, vuln?.total_vulns ?? 0,
+                    reportStats?.total ?? 0, reportStats?.submitted ?? 0,
+                    roi?.operations.reports_accepted ?? 0,
+                  ];
+                  const activeIdx = vals.findIndex(v => v === 0);
+                  const etapa = activeIdx === -1 ? "7/7" : `${activeIdx}/7`;
+                  const progresso = Math.round(vals.filter(v => v > 0).length / 7 * 100);
+                  const aceitacao = Math.round((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1) * 100);
+                  const aceitacaoColor = aceitacao >= 50 ? "text-emerald-400" : aceitacao >= 20 ? "text-amber-400" : "text-[var(--muted)]";
+                  const insight = (roi?.operations.reports_accepted ?? 0) === 0
+                    ? "Envie seus primeiros relatórios para começar a trilha."
+                    : ((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 < 50
+                      ? "Aumente o fluxo de envios para melhorar a conversão."
+                      : aceitacao < 30
+                        ? "Melhore a qualidade dos POCs para aumentar a aceitação."
+                        : "Ótima taxa! Escale a quantidade de descobertas.";
+
+                  return (
+                    <div className="flex items-center gap-0 divide-x divide-white/10">
+                      {[
+                        { label: "Etapa", value: etapa, color: "text-[var(--foreground)]" },
+                        { label: "Progresso", value: `${progresso}%`, color: "text-emerald-400" },
+                        { label: "Aceitação", value: `${aceitacao}%`, color: aceitacaoColor },
+                      ].map(m => (
+                        <div key={m.label} className="flex-none px-5 first:pl-0 text-center">
+                          <div className={`text-lg font-bold ${m.color}`}>{m.value}</div>
+                          <div className="text-[9px] text-[var(--muted)] uppercase tracking-wide">{m.label}</div>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Progress indicator - Enhanced */}
-                <div className="mt-10 pt-6 border-t border-white/10">
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
-                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
-                      <div className="text-[10px] font-bold text-indigo-300 mb-1">Etapa Atual</div>
-                      <div className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-indigo-400 to-cyan-400 bg-clip-text text-transparent">
-                        {(function() {
-                          const vals = [
-                            bounty?.programs ?? 0,
-                            recon?.recons_completed ?? 0,
-                            bounty?.alive_targets ?? 0,
-                            vuln?.total_vulns ?? 0,
-                            reportStats?.total ?? 0,
-                            reportStats?.submitted ?? 0,
-                            roi?.operations.reports_accepted ?? 0,
-                          ];
-                          const idx = vals.findIndex(v => v === 0);
-                          return idx === -1 ? "✓" : idx + 1;
-                        })()}
-                      </div>
-                      <div className="text-[9px] text-[var(--muted)] mt-1">de 7</div>
+                      ))}
+                      <p className="flex-1 pl-5 text-[11px] text-[var(--muted)] leading-relaxed">{insight}</p>
                     </div>
-                    
-                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
-                      <div className="text-[10px] font-bold text-emerald-300 mb-1">Progresso</div>
-                      <div className="text-xl sm:text-2xl font-bold bg-gradient-to-r from-emerald-400 to-green-400 bg-clip-text text-transparent">
-                        {Math.round((function() {
-                          const vals = [
-                            bounty?.programs ?? 0,
-                            recon?.recons_completed ?? 0,
-                            bounty?.alive_targets ?? 0,
-                            vuln?.total_vulns ?? 0,
-                            reportStats?.total ?? 0,
-                            reportStats?.submitted ?? 0,
-                            roi?.operations.reports_accepted ?? 0,
-                          ];
-                          return vals.filter(v => v > 0).length / 7 * 100;
-                        })())}%
-                      </div>
-                      <div className="text-[9px] text-[var(--muted)] mt-1">complete</div>
-                    </div>
-
-                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
-                      <div className="text-[10px] font-bold text-violet-300 mb-1">Taxa Conversão</div>
-                      <div className={`text-xl sm:text-2xl font-bold bg-clip-text text-transparent ${
-                        ((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 >= 50 
-                          ? 'bg-gradient-to-r from-green-400 to-emerald-400' 
-                          : (((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 >= 20 
-                            ? 'bg-gradient-to-r from-amber-400 to-yellow-400'
-                            : 'bg-gradient-to-r from-red-400 to-pink-400')
-                      }`}>
-                        {Math.round(((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100)}%
-                      </div>
-                      <div className="text-[9px] text-[var(--muted)] mt-1">Reports → Enviados</div>
-                    </div>
-
-                    <div className="text-center p-3 rounded-lg bg-white/5 hover:bg-white/10 transition-colors group/metric border border-white/5">
-                      <div className="text-[10px] font-bold text-green-300 mb-1">Aceitação</div>
-                      <div className={`text-xl sm:text-2xl font-bold bg-clip-text text-transparent ${
-                        ((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100 >= 50 
-                          ? 'bg-gradient-to-r from-green-400 to-emerald-400' 
-                          : (((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100 >= 20 
-                            ? 'bg-gradient-to-r from-amber-400 to-yellow-400'
-                            : 'bg-gradient-to-r from-red-400 to-pink-400')
-                      }`}>
-                        {Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100)}%
-                      </div>
-                      <div className="text-[9px] text-[var(--muted)] mt-1">Enviados → Aceitos</div>
-                    </div>
-                  </div>
-
-                  {/* Insights and recommendations */}
-                  <div className="mt-4 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20">
-                    <div className="flex gap-2">
-                      <span className="text-base pt-0.5">💡</span>
-                      <div className="text-[10px] text-blue-200/80">
-                        {(function() {
-                          if ((roi?.operations.reports_accepted ?? 0) === 0) {
-                            return "Comece enviando seus primeiros relatórios. Quanto mais variedade, melhor sua taxa de aceitação.";
-                          } else if (((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100 < 50) {
-                            return "Aumentar o fluxo de envios é crucial. Tente elevar a taxa de conversão reports → enviados.";
-                          } else if (((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100 < 30) {
-                            return "A qualidade dos relatórios é importante. Verifique o CVSS de suas descobertas e adicione POCs mais robustos.";
-                          } else {
-                            return "Ótima taxa de aceitação! Continue mantendo a qualidade e escale a quantidade de descobertas.";
-                          }
-                        })()}
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                  );
+                })()}
               </div>
             </div>
 
-            {/* Contextual Information & Metrics Card */}
-            <div className="relative px-6 py-6 rounded-xl border border-white/10 bg-gradient-to-br from-slate-500/5 via-slate-400/3 to-slate-500/5 backdrop-blur-md overflow-hidden">
-              {/* Background glow */}
-              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-slate-500/15 blur-3xl pointer-events-none" />
-              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-slate-500/10 blur-3xl pointer-events-none" />
-              
-              <div className="relative z-10">
-                <h3 className="text-sm font-bold text-[var(--foreground)] mb-4 flex items-center gap-2">
-                  <span>📊 Métricas de Desempenho</span>
-                  <span className="text-[10px] font-normal text-[var(--muted)]">Análise detalhada</span>
-                </h3>
-
-                {/* Key metrics grid */}
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
-                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all">
-                    <div className="text-[10px] font-bold text-slate-300 mb-1">Média por Programa</div>
-                    <div className="text-base sm:text-lg font-bold text-slate-200">
-                      {Math.round((bounty?.alive_targets ?? 0) / Math.max(bounty?.programs ?? 1, 1))}
-                    </div>
-                    <div className="text-[8px] text-slate-400 mt-1">Targets p/ Programa</div>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all">
-                    <div className="text-[10px] font-bold text-slate-300 mb-1">Vuln Taxa</div>
-                    <div className="text-base sm:text-lg font-bold text-amber-300">
-                      {Math.round((vuln?.total_vulns ?? 0) / Math.max(bounty?.alive_targets ?? 1, 1) * 10) / 10}
-                    </div>
-                    <div className="text-[8px] text-slate-400 mt-1">Vulnerabilidades p/ Host</div>
-                  </div>
-
-                  <div className="p-3 rounded-lg bg-white/5 border border-white/10 hover:border-white/20 transition-all">
-                    <div className="text-[10px] font-bold text-slate-300 mb-1">Reward Médio</div>
-                    <div className="text-base sm:text-lg font-bold text-green-300">
-                      ${((roi?.summary.total_earnings ?? 0) / Math.max(roi?.operations.reports_accepted ?? 1, 1)).toLocaleString(undefined, {maximumFractionDigits: 0})}
-                    </div>
-                    <div className="text-[8px] text-slate-400 mt-1">Por Aceitação</div>
-                  </div>
+            {/* Métricas de Desempenho */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+              <div className="px-6 py-5 border-b border-white/10 flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-slate-500/20 border border-slate-500/30 flex items-center justify-center text-base">📊</div>
+                <div>
+                  <span className="text-sm font-bold text-[var(--foreground)]">Métricas de Desempenho</span>
+                  <p className="text-[10px] text-[var(--muted)] mt-0.5">Indicadores chave do pipeline</p>
                 </div>
+              </div>
 
-                {/* Explanations */}
-                <div className="space-y-2 text-[10px]">
-                  <div className="flex gap-2 p-2 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
-                    <span className="text-indigo-400 font-bold flex-shrink-0">📋</span>
-                    <span className="text-indigo-200/80">
-                      <strong>Discover:</strong> Cadastre seus programas alvo nas principais plataformas. Use <code className="text-indigo-300">bountyTargets()</code> para explorar novos programas automaticamente.
-                    </span>
-                  </div>
+              <div className="px-6 py-5 space-y-4">
+                {/* KPI bars */}
+                {(function () {
+                  const reconCov  = Math.min(Math.round((recon?.recons_completed ?? 0) / Math.max(bounty?.programs ?? 1, 1) * 100), 100);
+                  const hostSurv  = Math.min(Math.round((bounty?.alive_targets ?? 0)   / Math.max(bounty?.targets ?? 1, 1) * 100), 100);
+                  const reportCov = Math.min(Math.round((reportStats?.total ?? 0)       / Math.max(vuln?.total_vulns ?? 1, 1) * 100), 100);
+                  const subRate   = Math.min(Math.round((reportStats?.submitted ?? 0)   / Math.max(reportStats?.total ?? 1, 1) * 100), 100);
+                  const accRate   = Math.min(Math.round((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1) * 100), 100);
 
-                  <div className="flex gap-2 p-2 rounded-lg bg-cyan-500/10 border border-cyan-500/20">
-                    <span className="text-cyan-400 font-bold flex-shrink-0">🔍</span>
-                    <span className="text-cyan-200/80">
-                      <strong>Recon:</strong> Use subfinder, httpx, e nuclei para mapear infraestrutura. O reconhecimento profundo aumenta as chances de descobrir vulnerabilidades.
-                    </span>
-                  </div>
+                  const kpis = [
+                    { label: "Cobertura de Recon",    value: reconCov,  suffix: "%", bar: "bg-cyan-500",    desc: `${recon?.recons_completed ?? 0} de ${bounty?.programs ?? 0} programas`    },
+                    { label: "Hosts Vivos",            value: hostSurv,  suffix: "%", bar: "bg-teal-500",    desc: `${bounty?.alive_targets ?? 0} de ${bounty?.targets ?? 0} targets`         },
+                    { label: "Reports por Vuln",       value: reportCov, suffix: "%", bar: "bg-violet-500",  desc: `${reportStats?.total ?? 0} de ${vuln?.total_vulns ?? 0} vulns`            },
+                    { label: "Taxa de Envio",          value: subRate,   suffix: "%", bar: "bg-blue-500",    desc: `${reportStats?.submitted ?? 0} de ${reportStats?.total ?? 0} reports`     },
+                    { label: "Taxa de Aceitação",      value: accRate,   suffix: "%", bar: "bg-emerald-500", desc: `${roi?.operations.reports_accepted ?? 0} de ${reportStats?.submitted ?? 0} enviados` },
+                  ];
 
-                  <div className="flex gap-2 p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-                    <span className="text-emerald-400 font-bold flex-shrink-0">⚡</span>
-                    <span className="text-emerald-200/80">
-                      <strong>Scan & Report:</strong> Execute scans com Nuclei/Nmap em paralelo. Para cada vulnerabilidade, prepare um relatório com CVSS, POC e steps para reprodução.
-                    </span>
-                  </div>
+                  return kpis.map(kpi => (
+                    <div key={kpi.label}>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-xs font-medium text-[var(--foreground)]">{kpi.label}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] text-[var(--muted)]">{kpi.desc}</span>
+                          <span className={`text-sm font-bold tabular-nums ${kpi.value >= 60 ? "text-emerald-400" : kpi.value >= 30 ? "text-amber-400" : "text-[var(--muted)]"}`}>
+                            {kpi.value}{kpi.suffix}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="h-2.5 bg-white/5 rounded-full overflow-hidden border border-white/5">
+                        <div
+                          className={`h-full ${kpi.bar} rounded-full transition-all duration-700 opacity-80`}
+                          style={{ width: `${Math.max(kpi.value, kpi.value > 0 ? 2 : 0)}%` }}
+                        />
+                      </div>
+                    </div>
+                  ));
+                })()}
 
-                  <div className="flex gap-2 p-2 rounded-lg bg-green-500/10 border border-green-500/20">
-                    <span className="text-green-400 font-bold flex-shrink-0">💰</span>
-                    <span className="text-green-200/80">
-                      <strong>Monetize:</strong> Submeta seus relatórios via API. Programas com alta recompensa tendem a ter critérios mais relaxados - comece por eles para ganhar confiança.
-                    </span>
-                  </div>
+                {/* KPI summary row */}
+                <div className="grid grid-cols-3 gap-3 pt-2 border-t border-white/10">
+                  {[
+                    { label: "Targets / Programa", value: Math.round((bounty?.alive_targets ?? 0) / Math.max(bounty?.programs ?? 1, 1)), color: "text-slate-300" },
+                    { label: "Vulns / Host",        value: (Math.round((vuln?.total_vulns ?? 0) / Math.max(bounty?.alive_targets ?? 1, 1) * 10) / 10).toFixed(1), color: "text-amber-300" },
+                    { label: "Reward Médio",        value: `$${((roi?.summary.total_earnings ?? 0) / Math.max(roi?.operations.reports_accepted ?? 1, 1)).toLocaleString(undefined, { maximumFractionDigits: 0 })}`, color: "text-emerald-300" },
+                  ].map(m => (
+                    <div key={m.label} className="text-center p-3 rounded-lg bg-white/5 border border-white/8">
+                      <div className={`text-lg font-bold ${m.color}`}>{m.value}</div>
+                      <div className="text-[9px] text-[var(--muted)] mt-0.5">{m.label}</div>
+                    </div>
+                  ))}
                 </div>
               </div>
             </div>
@@ -1249,165 +1088,76 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Success Rate Waterfall Chart */}
-            <div className="relative px-6 py-6 rounded-xl border border-white/10 bg-gradient-to-br from-indigo-500/5 via-purple-500/3 to-pink-500/5 backdrop-blur-md overflow-hidden">
-              {/* Background glow */}
-              <div className="absolute -top-20 -right-20 w-40 h-40 rounded-full bg-indigo-500/20 blur-3xl pointer-events-none" />
-              <div className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full bg-purple-500/10 blur-3xl pointer-events-none" />
-              
-              <div className="relative z-10">
-                <div className="flex items-center justify-between mb-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-[var(--foreground)] mb-1 flex items-center gap-2">
-                      <span>🎯 Taxa de Conversão</span>
-                      <span className="text-[10px] font-normal text-[var(--muted)]">Funil de progressão</span>
-                    </h3>
-                    <p className="text-[10px] text-[var(--muted)]">
-                      Acompanhe como seus ativos se transformam em receita. Cada percentual mostra quantos recursos avançam para a próxima etapa.
-                    </p>
-                  </div>
+            {/* Taxa de Conversão */}
+            <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden">
+              <div className="px-6 py-5 border-b border-white/10 flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-base">🎯</div>
+                <div>
+                  <span className="text-sm font-bold text-[var(--foreground)]">Taxa de Conversão</span>
+                  <p className="text-[10px] text-[var(--muted)] mt-0.5">Funil de progressão — cada barra mostra a % em relação à etapa anterior</p>
                 </div>
+              </div>
 
-                {/* Waterfall visualization */}
-                <div className="space-y-3">
-                  {[
-                    { 
-                      icon: "📋", 
-                      label: "Programas", 
-                      val: bounty?.programs ?? 0, 
-                      max: bounty?.programs ?? 1,
-                      color: "from-indigo-500 to-indigo-600",
-                      glow: "shadow-indigo-500/30",
-                      percent: 100 
-                    },
-                    { 
-                      icon: "🔍", 
-                      label: "Recon Completado", 
-                      val: recon?.recons_completed ?? 0, 
-                      max: bounty?.programs ?? 1,
-                      color: "from-cyan-500 to-cyan-600",
-                      glow: "shadow-cyan-500/30",
-                      percent: ((recon?.recons_completed ?? 0) / Math.max(bounty?.programs ?? 1, 1)) * 100
-                    },
-                    { 
-                      icon: "🎯", 
-                      label: "Targets Vivos", 
-                      val: bounty?.alive_targets ?? 0, 
-                      max: Math.max(bounty?.alive_targets ?? 1, 1),
-                      color: "from-teal-500 to-teal-600",
-                      glow: "shadow-teal-500/30",
-                      percent: ((bounty?.alive_targets ?? 0) / Math.max(recon?.recons_completed ?? 1, 1)) * 100
-                    },
-                    { 
-                      icon: "⚡", 
-                      label: "Vulnerabilidades", 
-                      val: vuln?.total_vulns ?? 0, 
-                      max: Math.max(vuln?.total_vulns ?? 1, 1),
-                      color: "from-amber-500 to-amber-600",
-                      glow: "shadow-amber-500/30",
-                      percent: ((vuln?.total_vulns ?? 0) / Math.max(bounty?.alive_targets ?? 1, 1)) * 100
-                    },
-                    { 
-                      icon: "📝", 
-                      label: "Relatórios", 
-                      val: reportStats?.total ?? 0, 
-                      max: Math.max(reportStats?.total ?? 1, 1),
-                      color: "from-violet-500 to-violet-600",
-                      glow: "shadow-violet-500/30",
-                      percent: ((reportStats?.total ?? 0) / Math.max(vuln?.total_vulns ?? 1, 1)) * 100
-                    },
-                    { 
-                      icon: "📤", 
-                      label: "Enviados", 
-                      val: reportStats?.submitted ?? 0, 
-                      max: Math.max(reportStats?.submitted ?? 1, 1),
-                      color: "from-blue-500 to-blue-600",
-                      glow: "shadow-blue-500/30",
-                      percent: ((reportStats?.submitted ?? 0) / Math.max(reportStats?.total ?? 1, 1)) * 100
-                    },
-                    { 
-                      icon: "✅", 
-                      label: "Aceitos", 
-                      val: roi?.operations.reports_accepted ?? 0, 
-                      max: Math.max(roi?.operations.reports_accepted ?? 1, 1),
-                      color: "from-emerald-500 to-emerald-600",
-                      glow: "shadow-emerald-500/30",
-                      percent: ((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100
-                    },
-                  ].map((s, i) => {
-                    const percent = Math.max(0, Math.min(100, s.percent));
+              <div className="px-6 py-5 space-y-4">
+                {(function () {
+                  const funnel = [
+                    { icon: "📋", label: "Programas",       val: bounty?.programs ?? 0,              prev: bounty?.programs ?? 1,                    color: "from-indigo-500 to-indigo-400",  badge: "bg-indigo-500/20 text-indigo-300"  },
+                    { icon: "🔍", label: "Recon Completado",val: recon?.recons_completed ?? 0,        prev: bounty?.programs ?? 1,                    color: "from-cyan-500 to-cyan-400",      badge: "bg-cyan-500/20 text-cyan-300"     },
+                    { icon: "🎯", label: "Targets Vivos",   val: bounty?.alive_targets ?? 0,          prev: recon?.recons_completed ?? 1,             color: "from-teal-500 to-teal-400",      badge: "bg-teal-500/20 text-teal-300"     },
+                    { icon: "⚡", label: "Vulnerabilidades",val: vuln?.total_vulns ?? 0,              prev: bounty?.alive_targets ?? 1,               color: "from-amber-500 to-amber-400",    badge: "bg-amber-500/20 text-amber-300"   },
+                    { icon: "📝", label: "Relatórios",      val: reportStats?.total ?? 0,             prev: vuln?.total_vulns ?? 1,                   color: "from-violet-500 to-violet-400",  badge: "bg-violet-500/20 text-violet-300" },
+                    { icon: "📤", label: "Enviados",        val: reportStats?.submitted ?? 0,         prev: reportStats?.total ?? 1,                  color: "from-blue-500 to-blue-400",      badge: "bg-blue-500/20 text-blue-300"     },
+                    { icon: "✅", label: "Aceitos",         val: roi?.operations.reports_accepted ?? 0,prev: reportStats?.submitted ?? 1,             color: "from-emerald-500 to-emerald-400",badge: "bg-emerald-500/20 text-emerald-300"},
+                  ];
+
+                  return funnel.map((s, i) => {
+                    const pct = Math.min(Math.max(i === 0 ? 100 : (s.val / Math.max(s.prev, 1)) * 100, 0), 100);
+                    const displayPct = Math.min(Math.max(pct, s.val > 0 ? 3 : 0), 100);
                     return (
                       <div key={i} className="group">
-                        <div className="flex items-center justify-between mb-1.5">
-                          <div className="flex items-center gap-2 text-[11px]">
+                        <div className="flex items-center justify-between mb-2">
+                          <div className="flex items-center gap-2.5">
                             <span className="text-base">{s.icon}</span>
-                            <span className="font-semibold text-[var(--foreground)]">{s.label}</span>
+                            <span className="text-xs font-semibold text-[var(--foreground)]">{s.label}</span>
                           </div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-bold tabular-nums text-indigo-300">{s.val.toLocaleString()}</span>
-                            <span className="text-[9px] text-[var(--muted)]">{Math.round(percent)}%</span>
+                          <div className="flex items-center gap-2.5">
+                            <span className="text-sm font-bold text-[var(--foreground)] tabular-nums">{s.val.toLocaleString()}</span>
+                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${s.badge}`}>
+                              {Math.round(pct)}%
+                            </span>
                           </div>
                         </div>
-                        
-                        {/* Progress bar with gradient */}
-                        <div className="relative h-6 rounded-lg overflow-hidden bg-white/5 border border-white/10 group-hover:border-white/20 transition-all duration-300">
-                          {/* Gradient fill */}
-                          <div 
-                            className={`absolute inset-y-0 left-0 rounded-lg bg-gradient-to-r ${s.color} transition-all duration-500 group-hover:shadow-lg ${s.glow}`}
-                            style={{ width: `${Math.max(5, percent)}%` }}
+                        <div className="relative h-8 rounded-lg overflow-hidden bg-white/5 border border-white/8 group-hover:border-white/15 transition-all duration-300">
+                          <div
+                            className={`absolute inset-y-0 left-0 rounded-lg bg-gradient-to-r ${s.color} transition-all duration-700`}
+                            style={{ width: `${displayPct}%`, opacity: 0.85 }}
                           />
-                          
-                          {/* Shimmer effect */}
-                          <div 
-                            className="absolute inset-y-0 left-0 rounded-lg bg-gradient-to-r from-white/30 via-white/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300"
-                            style={{ 
-                              width: `${Math.max(5, percent)}%`,
-                              animation: 'shimmer 2s infinite'
-                            }}
-                          />
-
-                          {/* Value label */}
-                          {percent > 15 && (
-                            <div className="absolute inset-0 flex items-center px-2 text-[10px] font-bold text-white/80">
-                              {Math.round(percent)}%
+                          {displayPct > 12 && (
+                            <div className="absolute inset-0 flex items-center px-3 text-[11px] font-bold text-white/90">
+                              {Math.round(pct)}%
                             </div>
                           )}
                         </div>
                       </div>
                     );
-                  })}
-                </div>
+                  });
+                })()}
 
-                {/* Summary metrics */}
-                <div className="grid grid-cols-3 gap-2 mt-6 pt-4 border-t border-white/10">
-                  <div className="text-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                    <div className="text-[9px] text-[var(--muted)] uppercase font-semibold mb-1">Conversão Total</div>
-                    <div className="text-lg font-bold bg-gradient-to-r from-emerald-400 to-cyan-400 bg-clip-text text-transparent">
-                      {Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(bounty?.programs ?? 1, 1)) * 100)}%
+                {/* Summary */}
+                <div className="grid grid-cols-3 gap-3 pt-3 border-t border-white/10">
+                  {[
+                    { label: "Conversão Total",   value: `${Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(bounty?.programs ?? 1, 1)) * 100)}%`, color: "text-emerald-400" },
+                    { label: "Taxa de Aceitação", value: `${Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100)}%`, color: "text-violet-400" },
+                    { label: "Média por Aceito",  value: `$${roi?.operations.reports_accepted ? (roi.summary.total_earnings / roi.operations.reports_accepted).toLocaleString("en-US", { maximumFractionDigits: 0 }) : "0"}`, color: "text-green-400" },
+                  ].map(m => (
+                    <div key={m.label} className="text-center p-3 rounded-lg bg-white/5 border border-white/8 hover:bg-white/8 transition-colors">
+                      <div className={`text-xl font-bold ${m.color}`}>{m.value}</div>
+                      <div className="text-[9px] text-[var(--muted)] uppercase tracking-wide mt-0.5">{m.label}</div>
                     </div>
-                  </div>
-                  <div className="text-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                    <div className="text-[9px] text-[var(--muted)] uppercase font-semibold mb-1">Taxa de Aceitação</div>
-                    <div className="text-lg font-bold bg-gradient-to-r from-violet-400 to-pink-400 bg-clip-text text-transparent">
-                      {Math.round(((roi?.operations.reports_accepted ?? 0) / Math.max(reportStats?.submitted ?? 1, 1)) * 100)}%
-                    </div>
-                  </div>
-                  <div className="text-center p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
-                    <div className="text-[9px] text-[var(--muted)] uppercase font-semibold mb-1">Média por Aceito</div>
-                    <div className="text-lg font-bold bg-gradient-to-r from-green-400 to-lime-400 bg-clip-text text-transparent">
-                      ${roi?.operations.reports_accepted ? (roi.summary.total_earnings / roi.operations.reports_accepted).toLocaleString('en-US', { maximumFractionDigits: 0 }) : '0'}
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </div>
             </div>
-
-            <style jsx>{`
-              @keyframes shimmer {
-                0% { transform: translateX(-100%); }
-                100% { transform: translateX(100%); }
-              }
-            `}</style>
           </div>
 
           {/* ══════════ ROW 2: Recon + Live Terminal + Report Submit ══════════ */}
@@ -2128,15 +1878,16 @@ export default function Home() {
                 </div>
               </div>
               <div className="border border-[var(--border)] rounded-xl overflow-hidden">
-                <div className="grid grid-cols-[1fr_80px_80px_80px_80px_80px] gap-0 px-3 py-2 bg-white/3 border-b border-[var(--border)] text-[9px] font-bold text-[var(--muted)] uppercase">
+                <div className="overflow-x-auto">
+                <div className="grid grid-cols-[minmax(120px,1fr)_80px_70px_70px_70px_70px] gap-0 px-3 py-2 bg-white/3 border-b border-[var(--border)] text-[9px] font-bold text-[var(--muted)] uppercase min-w-[480px]">
                   <span>Programa</span><span className="text-center">Plataforma</span><span className="text-center">Targets</span><span className="text-center">Alive</span><span className="text-center">Vulns</span><span className="text-center">Status</span>
                 </div>
-                <div className="max-h-[50vh] overflow-y-auto divide-y divide-[var(--border)]">
+                <div className="max-h-[50vh] overflow-y-auto divide-y divide-[var(--border)] min-w-[480px]">
                   {allPrograms.map(p => {
                     const isRunning = p.status === "reconning";
                     const hasTargets = (p.alive_count ?? 0) > 0;
                     return (
-                      <div key={p.id} className="grid grid-cols-[1fr_80px_80px_80px_80px_80px] gap-0 px-3 py-2.5 hover:bg-white/[0.02] transition-colors items-center">
+                      <div key={p.id} className="grid grid-cols-[minmax(120px,1fr)_80px_70px_70px_70px_70px] gap-0 px-3 py-2.5 hover:bg-white/[0.02] transition-colors items-center">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className={`w-2 h-2 rounded-full shrink-0 ${isRunning ? "bg-blue-400 animate-pulse" : p.status === "error" ? "bg-red-400" : hasTargets ? "bg-emerald-400" : "bg-[var(--muted)]"}`} />
                           <span className="text-xs font-medium text-[var(--foreground)] truncate">{p.name}</span>
@@ -2154,6 +1905,7 @@ export default function Home() {
                       </div>
                     );
                   })}
+                </div>
                 </div>
               </div>
               {allPrograms.length === 0 && (
@@ -2215,12 +1967,13 @@ export default function Home() {
 
               {/* Full table */}
               <div className="border border-[var(--border)] rounded-xl overflow-hidden">
-                <div className="grid grid-cols-[30px_40px_1fr_60px_80px_60px_1fr] gap-0 px-3 py-2 bg-white/3 border-b border-[var(--border)] text-[9px] font-bold text-[var(--muted)] uppercase">
+                <div className="overflow-x-auto">
+                <div className="grid grid-cols-[30px_40px_minmax(100px,1fr)_60px_80px_60px_minmax(80px,1fr)] gap-0 px-3 py-2 bg-white/3 border-b border-[var(--border)] text-[9px] font-bold text-[var(--muted)] uppercase min-w-[520px]">
                   <span>#</span><span>Tier</span><span>Programa</span><span className="text-center">Score</span><span className="text-center">Bounty Max</span><span className="text-center">Targets</span><span>Recomendação</span>
                 </div>
-                <div className="max-h-[50vh] overflow-y-auto divide-y divide-[var(--border)]">
+                <div className="max-h-[50vh] overflow-y-auto divide-y divide-[var(--border)] min-w-[520px]">
                   {programs.map((p, i) => (
-                    <div key={p.program_id} className="grid grid-cols-[30px_40px_1fr_60px_80px_60px_1fr] gap-0 px-3 py-2.5 hover:bg-white/[0.02] transition-colors items-center">
+                    <div key={p.program_id} className="grid grid-cols-[30px_40px_minmax(100px,1fr)_60px_80px_60px_minmax(80px,1fr)] gap-0 px-3 py-2.5 hover:bg-white/[0.02] transition-colors items-center">
                       <span className="text-[10px] text-[var(--muted)] tabular-nums">{i + 1}</span>
                       <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded border w-fit ${TIER_COLORS[p.tier] || "bg-slate-700 text-slate-300 border-slate-600"}`}>{p.tier}</span>
                       <span className="text-xs font-medium text-[var(--foreground)] truncate">{p.name}</span>
@@ -2230,6 +1983,7 @@ export default function Home() {
                       <span className="text-[10px] text-[var(--muted)] truncate">{p.recommendation}</span>
                     </div>
                   ))}
+                </div>
                 </div>
               </div>
               {programs.length === 0 && (

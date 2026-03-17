@@ -303,9 +303,9 @@ def process_vulnerabilities_to_reports(
                 result = report_col.insert_one(report_doc)
                 logger.info(f"Generated report for {ip}: {result.inserted_id}")
                 results["reports_generated"] += 1
-                
+
                 # Update vuln_results to link report
-                report_col.update_many(
+                vuln_col.update_many(
                     {"_id": {"$in": [v.get("_id") for v in ip_vulns]}},
                     {"$set": {"report_id": result.inserted_id}},
                 )

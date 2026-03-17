@@ -433,7 +433,7 @@ export default function BugHuntPage() {
       {activeTab === "overview" && (
         <div className="space-y-4">
           {/* Stats row */}
-          <div className="grid grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
             <Card>
               <Stat label="Programas" value={totalCount} color="text-green-400" />
             </Card>
@@ -778,7 +778,7 @@ export default function BugHuntPage() {
 
               <div className="space-y-4">
                 {/* Overview stats */}
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="p-3 rounded-lg bg-[var(--background)] border border-[var(--border)]">
                     <span className="text-[10px] uppercase tracking-wider text-[var(--muted)] font-semibold">Tipo</span>
                     <p className="text-xs font-medium text-[var(--foreground)] mt-1">{scopeAnalysis.tipo_aplicacao || "—"}</p>
@@ -1109,7 +1109,7 @@ export default function BugHuntPage() {
                 </div>
 
                 {/* Severity + CVSS */}
-                <div className="grid grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   <div className="p-3 rounded-lg bg-[var(--background)] border border-[var(--border)]">
                     <span className="text-[10px] uppercase tracking-wider text-[var(--muted)] font-semibold">Severidade</span>
                     <p className={`text-sm font-bold mt-1 ${

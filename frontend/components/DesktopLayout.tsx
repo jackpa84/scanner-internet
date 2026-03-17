@@ -496,10 +496,11 @@ function NavSidebar({ health }: { health: HealthInfo | null }) {
 
 function LayoutInner({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const { authenticated, loading } = useAuth();
+  const { authenticated, loading, logout } = useAuth();
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [now, setNow] = useState<Date | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [hydrated, setHydrated] = useState(false);
   const [loadTimeout, setLoadTimeout] = useState(false);
 
@@ -571,15 +572,105 @@ function LayoutInner({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="h-screen bg-[var(--background)] text-[var(--foreground)] flex overflow-hidden">
+      {/* Mobile nav overlay */}
+      {mobileNavOpen && (
+        <div
+          className="fixed inset-0 z-50 md:hidden"
+          onClick={() => setMobileNavOpen(false)}
+        >
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+          <aside
+            className="absolute left-0 top-0 bottom-0 w-64 bg-[var(--card)] border-r border-[var(--border)] flex flex-col z-10"
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Logo */}
+            <div className="h-14 shrink-0 flex items-center gap-2.5 px-4 border-b border-[var(--border)]">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-[var(--accent)]/15">
+                <svg className="w-4 h-4 text-[var(--accent-light)]" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 12.75L11.25 15 15 9.75m-3-7.036A11.959 11.959 0 013.598 6 11.99 11.99 0 003 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z" />
+                </svg>
+              </div>
+              <div>
+                <div className="text-sm font-bold tracking-tight leading-none text-[var(--foreground)]">Scanner</div>
+                <div className="text-[10px] text-[var(--accent-light)] font-medium mt-0.5">Bounty</div>
+              </div>
+              <button
+                onClick={() => setMobileNavOpen(false)}
+                className="ml-auto p-1.5 text-[var(--muted)] hover:text-[var(--foreground)]"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            {/* Nav groups */}
+            <nav className="flex-1 overflow-y-auto hide-scrollbar px-2 py-3 space-y-4">
+              {NAV_GROUPS.map(group => (
+                <div key={group.label}>
+                  <div className="px-2 mb-1 text-[9px] font-bold uppercase tracking-widest text-[var(--muted)]">
+                    {group.label}
+                  </div>
+                  <ul className="space-y-0.5">
+                    {group.items.map(item => {
+                      const active = pathname === item.href;
+                      return (
+                        <li key={item.href}>
+                          <a
+                            href={item.href}
+                            onClick={() => setMobileNavOpen(false)}
+                            className={`flex items-center gap-2.5 px-2.5 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                              active
+                                ? "bg-[var(--accent)]/15 text-[var(--accent-light)]"
+                                : "text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-white/[0.03]"
+                            }`}
+                          >
+                            <span className={active ? "text-[var(--accent-light)]" : "text-[var(--muted)]"}>
+                              {item.icon}
+                            </span>
+                            {item.label}
+                          </a>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              ))}
+            </nav>
+            {/* Logout */}
+            <div className="shrink-0 border-t border-[var(--border)] px-3 py-3">
+              <button
+                onClick={logout}
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-[var(--muted)] hover:text-red-400 hover:bg-red-500/5 transition-all"
+              >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" strokeWidth={1.75} stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15.75 9V5.25A2.25 2.25 0 0013.5 3h-6a2.25 2.25 0 00-2.25 2.25v13.5A2.25 2.25 0 007.5 21h6a2.25 2.25 0 002.25-2.25V15m3 0l3-3m0 0l-3-3m3 3H9" />
+                </svg>
+                Sair
+              </button>
+            </div>
+          </aside>
+        </div>
+      )}
+
       {/* Left sidebar nav */}
       <NavSidebar health={health} />
 
       {/* Right side: topbar + content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         {/* Top bar */}
-        <header className="h-10 md:h-10 shrink-0 border-b border-[var(--border)] bg-[var(--card)]/60 backdrop-blur-sm flex items-center px-3 md:px-4 gap-2 md:gap-3 z-50 overflow-x-auto">
-          {/* Mobile menu icon/breadcrumb placeholder */}
-          <span className="text-xs md:text-xs font-semibold text-[var(--foreground)] truncate flex-shrink-0">
+        <header className="h-12 md:h-10 shrink-0 border-b border-[var(--border)] bg-[var(--card)]/60 backdrop-blur-sm flex items-center px-3 md:px-4 gap-2 md:gap-3 z-50 overflow-x-auto">
+          {/* Mobile hamburger */}
+          <button
+            onClick={() => setMobileNavOpen(true)}
+            className="md:hidden p-1.5 text-[var(--muted)] hover:text-[var(--foreground)] shrink-0 -ml-1"
+            aria-label="Abrir menu"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+            </svg>
+          </button>
+          {/* Breadcrumb */}
+          <span className="text-xs font-semibold text-[var(--foreground)] truncate flex-shrink-0">
             {currentPage?.label ?? "Scanner"}
           </span>
 

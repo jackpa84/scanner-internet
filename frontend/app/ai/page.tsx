@@ -259,7 +259,7 @@ export default function AIAnalysisPage() {
   return (
     <div className="h-full flex flex-col gap-4 p-4 overflow-y-auto hide-scrollbar">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-start sm:items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-purple-500/15 border border-purple-500/30">
             <svg className="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" strokeWidth={1.75} stroke="currentColor">
@@ -287,7 +287,7 @@ export default function AIAnalysisPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-[var(--card)]/60 p-1 rounded-xl border border-[var(--border)]">
+      <div className="flex gap-1 bg-[var(--card)]/60 p-1 rounded-xl border border-[var(--border)] overflow-x-auto hide-scrollbar">
         {TABS.map(tab => (
           <button
             key={tab.id}
@@ -305,9 +305,9 @@ export default function AIAnalysisPage() {
       </div>
 
       {/* Content + Console */}
-      <div className="flex-1 grid grid-cols-12 gap-4 min-h-0">
+      <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 min-h-0">
         {/* Main content — 8 cols */}
-        <div className="col-span-8 overflow-y-auto hide-scrollbar space-y-4">
+        <div className="lg:col-span-8 overflow-y-auto hide-scrollbar space-y-4">
 
           {/* ═══════ TAB: OVERVIEW ═══════ */}
           {activeTab === "overview" && (
@@ -320,7 +320,7 @@ export default function AIAnalysisPage() {
               }>
                 {stats ? (
                   <div className="space-y-4">
-                    <div className="grid grid-cols-5 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
                       <StatBox label="Requests" value={stats.requests} color="#8b5cf6" />
                       <StatBox label="Tokens" value={stats.tokens_used > 1000 ? `${(stats.tokens_used / 1000).toFixed(1)}k` : stats.tokens_used} color="#06b6d4" />
                       <StatBox label="Erros" value={stats.errors} color={stats.errors > 0 ? "#ef4444" : "#22c55e"} />
@@ -328,7 +328,7 @@ export default function AIAnalysisPage() {
                       <StatBox label="Classified" value={stats.findings_classified} color="#10b981" />
                     </div>
 
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div className="rounded-xl bg-[var(--background)] p-3 border border-[var(--border)]">
                         <div className="flex items-center gap-2 mb-2">
                           <StatusDot ok={stats.enabled} />
@@ -472,8 +472,8 @@ export default function AIAnalysisPage() {
           {activeTab === "analyze" && (
             <Card title="Analisar HTTP Response" icon={<span className="text-base">🔍</span>}>
               <div className="space-y-3">
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="col-span-2">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="sm:col-span-2">
                     <label className="block text-[10px] uppercase tracking-wider font-bold text-[var(--muted)] mb-1">URL</label>
                     <input
                       value={analyzeUrl}
@@ -589,7 +589,7 @@ export default function AIAnalysisPage() {
                 </button>
 
                 {scopeResult && (
-                  <div className="grid grid-cols-2 gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     {scopeResult.in_scope?.length > 0 && (
                       <div className="rounded-xl bg-emerald-500/5 border border-emerald-500/20 p-3">
                         <div className="text-[10px] uppercase font-bold text-emerald-400 mb-2">In Scope ({scopeResult.in_scope.length})</div>
@@ -844,7 +844,7 @@ export default function AIAnalysisPage() {
         </div>
 
         {/* Console — 4 cols */}
-        <div className="col-span-4 flex flex-col min-h-0">
+        <div className="lg:col-span-4 flex flex-col min-h-0">
           <div className="rounded-2xl border border-[var(--border)] bg-[#0a0e14] flex flex-col flex-1 min-h-0 overflow-hidden">
             {/* Console header */}
             <div className="shrink-0 flex items-center gap-2 px-4 py-2.5 border-b border-[var(--border)] bg-[#0d1117]">

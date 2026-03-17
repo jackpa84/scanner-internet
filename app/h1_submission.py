@@ -11,6 +11,8 @@ Handles:
 
 import logging
 import os
+import threading
+import time
 import requests
 from datetime import datetime
 from typing import Any
@@ -75,21 +77,25 @@ def _get_h1_headers() -> dict[str, str]:
     }
 
 
-def _check_duplicate(report_title: str, ip: str) -> dict[str, Any] | None:
+def _check_duplicate(report_title: str, ip: str, program_handle: str = "") -> dict[str, Any] | None:
     """
     Check if a similar report already exists on H1.
-    
+
     Returns the existing report if found, None otherwise.
     """
     if not H1_API_TOKEN:
         return None
-    
+
+    handle = program_handle or H1_PROGRAM_HANDLE
+    if not handle:
+        return None
+
     try:
         # Query H1 for reports matching this vulnerability
         url = f"{H1_API_URL}/reports"
         params = {
-            "program_handle": H1_PROGRAM_HANDLE,
-            "filter[state]": "not-resolved",  # Check unresolved reports
+            "filter[program][]": handle,
+            "filter[state][]": "new,triaged,needs-more-info,pre-submission",
             "sort": "-created_at",
             "page[size]": 50,
         }
@@ -104,13 +110,20 @@ def _check_duplicate(report_title: str, ip: str) -> dict[str, Any] | None:
         if response.status_code == 200:
             data = response.json()
             reports = data.get("data", [])
-            
-            # Look for similar title or IP match
+
+            title_lower = report_title.lower()
+            ip_lower = ip.lower()
+
+            # Look for matching title or IP in existing reports
             for report in reports:
-                report_title_h1 = report.get("attributes", {}).get("title", "").lower()
-                report_summary = report.get("attributes", {}).get("vulnerability_information", "").lower()
-                
-                if ip.lower() in report_title_h1 or ip.lower() in report_summary:
+                attrs = report.get("attributes", {})
+                existing_title = attrs.get("title", "").lower()
+                existing_body = attrs.get("vulnerability_information", "").lower()
+
+                title_match = title_lower and title_lower in existing_title
+                ip_match = ip_lower and (ip_lower in existing_title or ip_lower in existing_body)
+
+                if title_match or ip_match:
                     logger.info(f"Found potential duplicate: {report.get('id')}")
                     return report
         
@@ -171,9 +184,26 @@ def submit_report_to_h1(
                 "reason": "Report not found",
                 "h1_issue_id": None,
             }
-        
+
+        # Determine program handle: prefer per-report handle over global env var
+        program_handle = (
+            report.get("program", {}).get("handle")
+            or H1_PROGRAM_HANDLE
+        )
+        if not program_handle:
+            return {
+                "status": "skipped",
+                "report_id": report_id,
+                "reason": "No program handle configured (set H1_PROGRAM_HANDLE or associate report with a program)",
+                "h1_issue_id": None,
+            }
+
         # Check for duplicates
-        duplicate = _check_duplicate(report.get("title", ""), report.get("ip", ""))
+        duplicate = _check_duplicate(
+            report.get("title", ""),
+            report.get("ip", ""),
+            program_handle=program_handle,
+        )
         if duplicate:
             logger.info(f"Duplicate found, not submitting: {duplicate.get('id')}")
             return {
@@ -182,17 +212,30 @@ def submit_report_to_h1(
                 "reason": f"Duplicate of H1 report {duplicate.get('id')}",
                 "h1_issue_id": duplicate.get("id"),
             }
-        
+
+        severity_rating = _map_severity_to_h1(report.get("severity", "medium"))
+
         # Prepare submission payload
+        attributes: dict[str, Any] = {
+            "team_handle": program_handle,
+            "title": report.get("title", "Security Finding"),
+            "vulnerability_information": report.get("body", ""),
+            "impact": report.get("impact", ""),
+            "severity_rating": severity_rating,
+        }
+
+        # Include structured CVSS when available
+        cvss_vector = report.get("cvss_vector", "")
+        if cvss_vector:
+            attributes["severity"] = {
+                "rating": severity_rating,
+                "cvss_vector_string": cvss_vector,
+            }
+
         payload = {
             "data": {
                 "type": "report",
-                "attributes": {
-                    "title": report.get("title", "Security Finding"),
-                    "vulnerability_information": report.get("body", ""),
-                    "impact": report.get("impact", ""),
-                    "severity_rating": _map_severity_to_h1(report.get("severity", "medium")),
-                }
+                "attributes": attributes,
             }
         }
         
@@ -338,9 +381,9 @@ def batch_submit_reports(
             logger.info("No reports to submit")
             return results
         
-        for report in reports:
+        for i, report in enumerate(reports):
             result = submit_report_to_h1(str(report["_id"]), dry_run=dry_run)
-            
+
             if result["status"] == "submitted":
                 results["submitted"] += 1
             elif result["status"] == "duplicate":
@@ -349,8 +392,12 @@ def batch_submit_reports(
                 results["skipped"] += 1
             else:
                 results["errors"] += 1
-            
+
             results["details"].append(result)
+
+            # Rate limit: pause 2s between submissions to avoid H1 throttling
+            if not dry_run and i < len(reports) - 1:
+                time.sleep(2)
         
         logger.info(f"Batch submission complete: {results['submitted']} submitted, {results['duplicates']} duplicates, {results['errors']} errors")
         
@@ -391,8 +438,6 @@ def get_submission_queue() -> list[dict]:
 # ---------------------------------------------------------------------------
 # Auto-submit background loop
 # ---------------------------------------------------------------------------
-import time
-import threading
 
 
 def _auto_submit_loop() -> None:
