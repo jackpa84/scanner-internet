@@ -1,4 +1,4 @@
-# Modo alto desempenho — 90% da máquina local (12 CPUs / 22GB RAM)
+# Modo alto desempenho — TencentCloud (4 vCPUs / 15GB RAM)
 services:
   mongo:
     image: mongo:7
@@ -22,11 +22,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.5"
-          memory: 4g
+          cpus: "1.0"
+          memory: 2g
         reservations:
           cpus: "0.5"
-          memory: 1g
+          memory: 512m
 
   redis:
     image: redis:7-alpine
@@ -36,13 +36,17 @@ services:
       - "6379:6379"
     command: >
       redis-server
-      --maxmemory 2048mb
+      --maxmemory 4096mb
       --maxmemory-policy allkeys-lru
       --appendonly no
       --save ""
-      --tcp-backlog 2048
+      --tcp-backlog 4096
       --hz 20
       --dynamic-hz yes
+      --lazyfree-lazy-eviction yes
+      --lazyfree-lazy-expire yes
+      --io-threads 1
+      --io-threads-do-reads yes
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -57,8 +61,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 2g
+          cpus: "1.5"
+          memory: 5g
         reservations:
           cpus: "0.5"
           memory: 512m
@@ -136,27 +140,32 @@ services:
       MASSCAN_RATE: "50000"
 
       # --- Vuln scanner ---
-      VULN_WORKERS: "20"
+      VULN_WORKERS: "8"
       VULN_AUTO_SCAN: "true"
-      VULN_AUTO_MIN_SCORE: "70"
-      NUCLEI_SEVERITY: "critical,high"
-      NUCLEI_TIMEOUT: "60"
-      NUCLEI_RATE_LIMIT: "300"
-      NUCLEI_BULK_SIZE: "50"
-      NUCLEI_CONCURRENCY: "30"
-      NUCLEI_RETRIES: "2"
+      VULN_AUTO_MIN_SCORE: "60"
+      NUCLEI_SEVERITY: "critical,high,medium"
+      NUCLEI_TIMEOUT: "90"
+      NUCLEI_RATE_LIMIT: "1000"
+      NUCLEI_BULK_SIZE: "200"
+      NUCLEI_CONCURRENCY: "100"
+      NUCLEI_RETRIES: "0"
       NMAP_TIMEOUT: "60"
 
       # --- Bounty recon ---
       BOUNTY_MODE: "true"
-      BOUNTY_RECON_INTERVAL: "7200"
-      BOUNTY_RECON_WORKERS: "20"
+      BOUNTY_RECON_INTERVAL: "3600"
+      BOUNTY_RECON_WORKERS: "8"
+      MAX_SUBPROCESS_WORKERS: "20"
       SUBFINDER_TIMEOUT: "60"
-      HTTPX_TIMEOUT: "45"
-      HTTPX_THREADS: "200"
+      HTTPX_TIMEOUT: "20"
+      HTTPX_THREADS: "300"
+      CRTSH_RATE_INTERVAL: "4"
+      SECURITY_CHECK_WORKERS: "40"
+      ADVANCED_SCAN_WORKERS: "8"
+      SAVE_TARGET_WORKERS: "30"
 
       # --- HackerOne ---
-      HACKERONE_API_USERNAME: "jackpa1984"
+      HACKERONE_API_USERNAME: "${HACKERONE_API_USERNAME:-jackpach2084}"
       HACKERONE_API_TOKEN: "${HACKERONE_API_TOKEN:-}"
       H1_API_TOKEN: "${HACKERONE_API_TOKEN:-}"
       H1_PROGRAM_HANDLE: "${H1_PROGRAM_HANDLE:-}"
@@ -201,7 +210,7 @@ services:
       BOUNTY_DATA_PLATFORMS: "hackerone,intigriti,yeswehack"
 
       # --- Advanced scanners ---
-      PROGRAM_SCORER_ENABLED: "false"
+      PROGRAM_SCORER_ENABLED: "true"
       PROGRAM_SCORER_INTERVAL: "3600"
       H1_MONITOR_INTERVAL: "1800"
       IDOR_SCANNER_ENABLED: "true"
@@ -241,7 +250,7 @@ services:
       - app.main:app
       - --host=0.0.0.0
       - --port=5000
-      - --workers=4
+      - --workers=2
       - --loop=uvloop
       - --log-level=warning
       - --timeout-keep-alive=120
@@ -258,16 +267,16 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "7.0"
-          memory: 12g
+          cpus: "3.5"
+          memory: 11g
         reservations:
-          cpus: "2.0"
-          memory: 2g
+          cpus: "1.5"
+          memory: 3g
 
   frontend:
     build:
       context: ./frontend
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     platform: linux/amd64
     container_name: scanner_frontend
     depends_on:
@@ -276,16 +285,10 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: ""
+      NEXT_PUBLIC_API_URL: "https://helpaste.com"
       API_BACKEND_URL: http://app:5000
-      NODE_ENV: development
-      WATCHPACK_POLLING: "true"
-      CHOKIDAR_USEPOLLING: "true"
+      NODE_ENV: production
       NODE_OPTIONS: "--max-old-space-size=1024"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -303,9 +306,43 @@ services:
     networks:
       - scanner_net
 
+  nginx:
+    image: nginx:alpine
+    container_name: scanner_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - certbot_www:/var/www/certbot:ro
+      - certbot_certs:/etc/letsencrypt:ro
+    depends_on:
+      - frontend
+      - app
+    restart: unless-stopped
+    networks:
+      - scanner_net
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  certbot:
+    image: certbot/certbot
+    container_name: scanner_certbot
+    volumes:
+      - certbot_www:/var/www/certbot
+      - certbot_certs:/etc/letsencrypt
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done'"
+    networks:
+      - scanner_net
+
 volumes:
   redis_data:
   mongo_data:
+  certbot_www:
+  certbot_certs:
 
 networks:
   scanner_net:
