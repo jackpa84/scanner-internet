@@ -579,7 +579,8 @@ class BugHuntScraper(BaseScraper):
             logger.error("[BH-SCRAPER] capsolver package not installed")
             return ""
 
-        login_url = f"{self.ADMIN}/login"
+        # SPA: /login returns 404 server-side, use root URL for CapSolver
+        login_url = self.ADMIN
 
         for attempt in range(1, 4):
             try:
@@ -605,7 +606,18 @@ class BugHuntScraper(BaseScraper):
     def _auth_api(self, captcha: str) -> str:
         """Authenticate via BugHunt API with captcha token."""
         logger.info("[BH-SCRAPER] Authenticating via API...")
+        UA = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        )
         try:
+            # Warm up session/cookies on the frontend before hitting auth API
+            self.session.get(
+                self.ADMIN,
+                headers={"User-Agent": UA, "Accept": "text/html,*/*", "Accept-Language": "pt-BR,pt;q=0.9"},
+                timeout=15,
+            )
             resp = self.session.post(
                 self.AUTH_URL,
                 json={
@@ -615,7 +627,14 @@ class BugHuntScraper(BaseScraper):
                 },
                 headers={
                     "Origin": self.ADMIN,
+                    "Referer": f"{self.ADMIN}/login",
                     "Content-Type": "application/json",
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "pt-BR,pt;q=0.9,en;q=0.8",
+                    "User-Agent": UA,
+                    "sec-fetch-dest": "empty",
+                    "sec-fetch-mode": "cors",
+                    "sec-fetch-site": "same-site",
                 },
                 timeout=_TIMEOUT,
             )
