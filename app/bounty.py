@@ -80,6 +80,8 @@ _CRTSH_MIN_INTERVAL = float(os.getenv("CRTSH_RATE_INTERVAL", "8"))
 # evita contenção de GIL e sobrecarga da VM
 _subprocess_sem = threading.Semaphore(int(os.getenv("MAX_SUBPROCESS_WORKERS", "6")))
 RECON_WORKERS = int(os.getenv("BOUNTY_RECON_WORKERS", "2"))
+ENUM_DOMAIN_WORKERS = int(os.getenv("ENUM_DOMAIN_WORKERS", "8"))
+ADVSCAN_TYPE_WORKERS = int(os.getenv("ADVSCAN_TYPE_WORKERS", "4"))
 SUBFINDER_TIMEOUT = int(os.getenv("SUBFINDER_TIMEOUT", "300"))
 HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "300"))
 RECON_HTTP_TIMEOUT = int(os.getenv("RECON_HTTP_TIMEOUT", "8"))
@@ -1286,7 +1288,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         all_subdomains: set[str] = set()
         from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
         if len(root_domains) > 1:
-            with _TPE(max_workers=min(len(root_domains), 4), thread_name_prefix="enum") as _pool:
+            with _TPE(max_workers=min(len(root_domains), ENUM_DOMAIN_WORKERS), thread_name_prefix="enum") as _pool:
                 _futs = {_pool.submit(run_all_subdomain_sources, d): d for d in root_domains}
                 for _f in _ac(_futs):
                     try:
@@ -1569,7 +1571,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                     try: return scan_target_for_race(host, ctx["crawled"], ctx["wb"])
                     except Exception: return []
                 # 4 tipos de scan em paralelo por host
-                with _ATPE(max_workers=4, thread_name_prefix="advscan") as _ap:
+                with _ATPE(max_workers=ADVSCAN_TYPE_WORKERS, thread_name_prefix="advscan") as _ap:
                     _fmap = {_ap.submit(_idor): "idor", _ap.submit(_ssrf): "ssrf",
                              _ap.submit(_gql): "gql", _ap.submit(_race): "race"}
                     for _af in _aac(_fmap):
