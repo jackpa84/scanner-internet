@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useMemo } from "react";
+import { RefreshBadge } from "@/components/RefreshBadge";
 import {
   fetchBugHuntStatus,
   testBugHuntConnection,
@@ -81,6 +82,7 @@ export default function BugHuntPage() {
   const [bountyOnly, setBountyOnly] = useState(false);
   const [activeTab, setActiveTab] = useState<"overview" | "programs" | "ai" | "reports" | "config">("overview");
   const [expandedProgram, setExpandedProgram] = useState<string | null>(null);
+  const [lastUpdated, setLastUpdated] = useState(0);
 
   /* ── Saved Reports state ──────────────────────────────── */
   type SavedReport = NonNullable<BugHuntReport["report"]> & { savedAt: string; id: string };
@@ -210,6 +212,7 @@ export default function BugHuntPage() {
       setStatus(s);
       setPrograms(p.programs || []);
       setTotalCount(p.count || 0);
+      setLastUpdated(Date.now());
     } catch (e) {
       console.error("[BugHunt] load error:", e);
     } finally {
@@ -399,7 +402,10 @@ export default function BugHuntPage() {
             <span className="text-lg">🇧🇷</span>
           </div>
           <div>
-            <h1 className="text-xl font-bold tracking-tight">BugHunt</h1>
+            <h1 className="text-xl font-bold tracking-tight flex items-center gap-2">
+              BugHunt
+              <RefreshBadge intervalSec={30} lastUpdated={lastUpdated} />
+            </h1>
             <p className="text-xs text-[var(--muted)]">Plataforma brasileira de bug bounty</p>
           </div>
         </div>

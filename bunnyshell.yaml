@@ -1,0 +1,160 @@
+kind: Environment
+name: scanner-internet
+type: primary
+
+components:
+
+  - kind: Database
+    name: mongo
+    dockerCompose:
+      image: mongo:7
+      environment:
+        MONGO_INITDB_ROOT_USERNAME: admin
+        MONGO_INITDB_ROOT_PASSWORD: "SECRET[mongo_password]"
+        MONGO_INITDB_DATABASE: scanner
+      ports:
+        - "27017:27017"
+      deploy:
+        resources:
+          limits:
+            memory: 1g
+            cpus: "0.5"
+    volumes:
+      - name: mongo-data
+        mount: /data/db
+
+  - kind: Service
+    name: redis
+    dockerCompose:
+      image: redis:7-alpine
+      command: >
+        redis-server
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --appendonly no
+        --save ""
+      ports:
+        - "6379:6379"
+      deploy:
+        resources:
+          limits:
+            memory: 512m
+            cpus: "0.5"
+    volumes:
+      - name: redis-data
+        mount: /data
+
+  - kind: Application
+    name: app
+    gitRepo: "{{ env.vars.GIT_REPO }}"
+    gitBranch: main
+    gitApplicationPath: /
+    dockerCompose:
+      build:
+        context: .
+        dockerfile: Dockerfile
+      ports:
+        - "5000:5000"
+      environment:
+        REDIS_URL: "redis://redis:6379/0"
+        MONGODB_URI: "mongodb://admin:SECRET[mongo_password]@mongo:27017/scanner?authSource=admin"
+        AUTH_USERNAME: "{{ env.vars.AUTH_USERNAME }}"
+        AUTH_PASSWORD: "SECRET[auth_password]"
+        LOG_LEVEL: "WARNING"
+        PYTHONUNBUFFERED: "1"
+        BOUNTY_MODE: "true"
+        BOUNTY_RECON_INTERVAL: "7200"
+        BOUNTY_RECON_WORKERS: "10"
+        VULN_WORKERS: "10"
+        VULN_AUTO_SCAN: "true"
+        VULN_AUTO_MIN_SCORE: "70"
+        NUCLEI_SEVERITY: "critical,high"
+        NUCLEI_RATE_LIMIT: "150"
+        NUCLEI_CONCURRENCY: "15"
+        SUBFINDER_TIMEOUT: "60"
+        HTTPX_TIMEOUT: "45"
+        HTTPX_THREADS: "100"
+        NETWORK_SCANNER_ENABLED: "false"
+        MASSCAN_ENABLED: "false"
+        HTTP_PORT_SCANNER_ENABLED: "false"
+        HACKERONE_API_USERNAME: "jackpa1984"
+        HACKERONE_API_TOKEN: "SECRET[hackerone_api_token]"
+        H1_API_TOKEN: "SECRET[hackerone_api_token]"
+        H1_AUTO_SUBMIT: "false"
+        H1_AUTO_SUBMIT_DRY_RUN: "true"
+        INTIGRITI_API_TOKEN: "SECRET[intigriti_api_token]"
+        AI_PROVIDER: "anthropic"
+        ANTHROPIC_API_KEY: "SECRET[anthropic_api_key]"
+        ANTHROPIC_MODEL: "claude-sonnet-4-6"
+        AI_MAX_TOKENS: "4000"
+        AI_TEMPERATURE: "0.1"
+        BOUNTY_DATA_ENABLED: "true"
+        BOUNTY_DATA_INTERVAL: "1800"
+        BOUNTY_DATA_AUTO_IMPORT: "true"
+        BOUNTY_DATA_MIN_BOUNTY: "100"
+        BOUNTY_DATA_PLATFORMS: "hackerone,intigriti,yeswehack"
+        IDOR_SCANNER_ENABLED: "true"
+        SSRF_SCANNER_ENABLED: "true"
+        GRAPHQL_SCANNER_ENABLED: "true"
+        RACE_SCANNER_ENABLED: "true"
+        INTERACTSH_ENABLED: "true"
+        INTERACTSH_SERVER: "interact.sh"
+        CT_MONITOR_ENABLED: "true"
+        CT_POLL_INTERVAL: "600"
+        ROI_TRACKER_ENABLED: "true"
+        PLATFORM_WATCHER_ENABLED: "true"
+        PLATFORM_WATCHER_INTERVAL: "1800"
+        PLATFORM_WATCHER_PLATFORMS: "hackerone,intigriti,yeswehack"
+        DISCORD_WEBHOOK_URL: "SECRET[discord_webhook_url]"
+        TELEGRAM_BOT_TOKEN: "SECRET[telegram_bot_token]"
+        TELEGRAM_CHAT_ID: "SECRET[telegram_chat_id]"
+        BUG_SCRAPER_PATH: "/opt/Bug_Scraper/bug-scraper.py"
+        HTTP_PORT_SCANNER_PATH: "/opt/HTTP-Port-Scanner-HackerOne-Edition/scanner.py"
+        CUSTOM_NUCLEI_TEMPLATES: "/app/nuclei-custom-templates"
+      deploy:
+        resources:
+          limits:
+            memory: 3g
+            cpus: "2.0"
+          reservations:
+            memory: 512m
+            cpus: "0.5"
+      command:
+        - uvicorn
+        - app.main:app
+        - --host=0.0.0.0
+        - --port=5000
+        - --workers=2
+        - --loop=uvloop
+        - --log-level=warning
+        - --timeout-keep-alive=120
+    hosts:
+      - hostname: "app-{{ env.base_domain }}"
+        path: /
+        servicePort: 5000
+
+  - kind: Application
+    name: frontend
+    gitRepo: "{{ env.vars.GIT_REPO }}"
+    gitBranch: main
+    gitApplicationPath: /frontend
+    dockerCompose:
+      build:
+        context: ./frontend
+        dockerfile: Dockerfile
+      ports:
+        - "3000:3000"
+      environment:
+        NEXT_PUBLIC_API_URL: ""
+        API_BACKEND_URL: "http://app:5000"
+        NODE_ENV: production
+        NODE_OPTIONS: "--max-old-space-size=512"
+      deploy:
+        resources:
+          limits:
+            memory: 1g
+            cpus: "0.5"
+    hosts:
+      - hostname: "{{ env.base_domain }}"
+        path: /
+        servicePort: 3000

@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import { RefreshBadge } from "@/components/RefreshBadge";
 import {
   fetchAIStats,
   fetchBountyPrograms,
@@ -82,6 +83,7 @@ export default function AIAnalysisPage() {
   /* ── State ── */
   const [stats, setStats] = useState<AIStats | null>(null);
   const [programs, setPrograms] = useState<BountyProgram[]>([]);
+  const [lastUpdated, setLastUpdated] = useState(0);
   const [activeTab, setActiveTab] = useState<"overview" | "classify" | "analyze" | "scope" | "js" | "programs">("overview");
 
   // Classify Finding
@@ -139,6 +141,7 @@ export default function AIAnalysisPage() {
       const [s, p] = await Promise.all([fetchAIStats(), fetchBountyPrograms()]);
       setStats(s);
       setPrograms(p);
+      setLastUpdated(Date.now());
     } catch (e) {
       console.error("[AI] Load error:", e);
     }
@@ -267,7 +270,10 @@ export default function AIAnalysisPage() {
             </svg>
           </div>
           <div>
-            <h1 className="text-lg font-black text-[var(--foreground)] tracking-tight">AI Analysis</h1>
+            <h1 className="text-lg font-black text-[var(--foreground)] tracking-tight flex items-center gap-2">
+              AI Analysis
+              <RefreshBadge intervalSec={15} lastUpdated={lastUpdated} />
+            </h1>
             <p className="text-[11px] text-[var(--muted)]">
               BugGenie — Análise inteligente de vulnerabilidades com LLM
             </p>

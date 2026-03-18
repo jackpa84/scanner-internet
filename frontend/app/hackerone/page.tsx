@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import { RefreshBadge } from "@/components/RefreshBadge";
 import {
   fetchH1Stats,
   fetchH1Queue,
@@ -70,6 +71,7 @@ export default function HackerOnePage() {
   const [submittedStats, setSubmittedStats] = useState<SubmittedReportsStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(0);
 
   // Discover
   const [searchQuery, setSearchQuery] = useState("");
@@ -131,7 +133,26 @@ export default function HackerOnePage() {
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ─── refresh ─── */
+  /* ─── silent auto-refresh (sem toast) ─── */
+  const silentRefresh = useCallback(async () => {
+    try {
+      const [stats, queue, rStats, reports, submitted, sStats] = await Promise.all([
+        fetchH1Stats(), fetchH1Queue(), fetchReportStats(),
+        fetchLocalReports(100, "draft"), fetchSubmittedReports(50), fetchSubmittedReportsStats(),
+      ]);
+      setH1Stats(stats); setH1Queue(queue.reports || []);
+      setReportStats(rStats); setLocalReports(reports.reports || []);
+      setSubmittedReports(submitted); setSubmittedStats(sStats);
+      setLastUpdated(Date.now());
+    } catch { /* silent */ }
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(silentRefresh, 60000);
+    return () => clearInterval(id);
+  }, [silentRefresh]);
+
+  /* ─── refresh manual ─── */
   const refreshAll = async () => {
     setLoading(true);
     const lid = push("load", "Atualizando dados...");
@@ -143,6 +164,7 @@ export default function HackerOnePage() {
       setH1Stats(stats); setH1Queue(queue.reports || []);
       setReportStats(rStats); setLocalReports(reports.reports || []);
       setSubmittedReports(submitted); setSubmittedStats(sStats);
+      setLastUpdated(Date.now());
       remove(lid);
       push("ok", "Dados atualizados");
     } catch {
@@ -252,7 +274,10 @@ export default function HackerOnePage() {
               🏴‍☠️
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">HackerOne</h1>
+              <h1 className="text-lg font-bold text-white tracking-tight flex items-center gap-2">
+                HackerOne
+                <RefreshBadge intervalSec={60} lastUpdated={lastUpdated} />
+              </h1>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`w-2 h-2 rounded-full ${credOk ? "bg-emerald-400 animate-pulse shadow-lg shadow-emerald-400/50" : credInvalid ? "bg-rose-400" : "bg-amber-400"}`} />
                 <span className="text-[10px] text-slate-500">

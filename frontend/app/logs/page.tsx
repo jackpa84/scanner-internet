@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { RefreshBadge } from "@/components/RefreshBadge";
 import {
   fetchDbActivity,
   fetchHealth,
@@ -128,6 +129,8 @@ export default function LogsPage() {
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<"activity" | "api" | "circuit">("activity");
   const [autoScroll, setAutoScroll] = useState(true);
+  const [lastActivityUpdate, setLastActivityUpdate] = useState(0);
+  const [lastStatsUpdate, setLastStatsUpdate] = useState(0);
 
   const seenKeys = useRef<Set<string>>(new Set());
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -192,13 +195,14 @@ export default function LogsPage() {
       }
 
       if (seenKeys.current.size > 1000) {
-        const arr = [...seenKeys.current];
+        const arr = Array.from(seenKeys.current);
         seenKeys.current = new Set(arr.slice(-500));
       }
 
       if (newLines.length > 0) {
         setLines(prev => [...newLines, ...prev].slice(0, MAX_LINES));
       }
+      setLastActivityUpdate(Date.now());
     } catch { /* ignore */ }
   }, [paused]);
 
@@ -216,6 +220,7 @@ export default function LogsPage() {
     if (results[2].status === "fulfilled") setVulnCount(results[2].value.total_vulns);
     if (results[3].status === "fulfilled") setScannerStats(results[3].value);
     if (results[4].status === "fulfilled") setBountyStats(results[4].value);
+    setLastStatsUpdate(Date.now());
   }, []);
 
   useEffect(() => {
@@ -262,7 +267,11 @@ export default function LogsPage() {
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div className="flex items-center gap-3">
           <a href="/" className="text-xs text-[var(--muted)] hover:text-[var(--accent-light)] transition-colors">← Dashboard</a>
-          <h1 className="text-lg font-bold gradient-text">API Logs & Monitoring</h1>
+          <h1 className="text-lg font-bold gradient-text flex items-center gap-2">
+            API Logs & Monitoring
+          </h1>
+          <RefreshBadge intervalSec={5} lastUpdated={lastActivityUpdate} label="activity" />
+          <RefreshBadge intervalSec={10} lastUpdated={lastStatsUpdate} label="stats" />
         </div>
         <div className="flex items-center gap-2">
           <button onClick={() => setPaused(p => !p)}

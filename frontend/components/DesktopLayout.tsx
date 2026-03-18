@@ -149,7 +149,7 @@ function useBackendActivity() {
         if (seenRef.current.has(key)) continue;
         seenRef.current.add(key);
         if (seenRef.current.size > 500) {
-          const arr = [...seenRef.current];
+          const arr = Array.from(seenRef.current);
           seenRef.current = new Set(arr.slice(-300));
         }
 

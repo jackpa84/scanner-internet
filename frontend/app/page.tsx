@@ -1,6 +1,7 @@
 "use client";
 
 import { Component, type ReactNode, useEffect, useState, useCallback, useRef } from "react";
+import { RefreshBadge } from "@/components/RefreshBadge";
 import BountyPanel from "@/components/BountyPanel";
 import VulnPanel from "@/components/VulnPanel";
 import {
@@ -396,6 +397,9 @@ export default function Home() {
   const [h1Msg, setH1Msg] = useState("");
   const [activeModal, setActiveModal] = useState<string | null>(null);
   const [sysMetrics, setSysMetrics] = useState<SystemMetrics | null>(null);
+  const [lastFastUpdate, setLastFastUpdate] = useState(0);
+  const [lastSlowUpdate, setLastSlowUpdate] = useState(0);
+  const [lastMetricsUpdate, setLastMetricsUpdate] = useState(0);
 
   const loadFast = useCallback(async () => {
     const results = await Promise.allSettled([
@@ -404,6 +408,7 @@ export default function Home() {
     ]);
     if (results[0].status === "fulfilled") setBounty(results[0].value);
     if (results[1].status === "fulfilled") setVuln(results[1].value);
+    setLastFastUpdate(Date.now());
   }, []);
 
   const loadSlow = useCallback(async () => {
@@ -434,6 +439,7 @@ export default function Home() {
       setH1Stats(stats);
       setH1Queue(queue.reports || []);
     } catch { /* silent */ }
+    setLastSlowUpdate(Date.now());
   }, []);
 
   useEffect(() => {
@@ -447,7 +453,7 @@ export default function Home() {
   /* ── System metrics polling ── */
   useEffect(() => {
     const poll = async () => {
-      try { setSysMetrics(await fetchSystemMetrics()); } catch { /* silent */ }
+      try { setSysMetrics(await fetchSystemMetrics()); setLastMetricsUpdate(Date.now()); } catch { /* silent */ }
     };
     poll();
     const id = setInterval(poll, 5000);
@@ -486,22 +492,29 @@ export default function Home() {
 
   return (
     <div className="space-y-3">
-      {/* ── Tab Navigation ── */}
-      <div className="flex items-center gap-1 bg-[var(--card)] border border-[var(--border)] rounded-xl p-1 w-fit">
-        {tabs.map(t => (
-          <button
-            key={t.id}
-            onClick={() => setActiveTab(t.id)}
-            className={`px-4 py-2 text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 ${
-              activeTab === t.id
-                ? "bg-[var(--accent)]/15 text-[var(--accent-light)] shadow-sm shadow-[var(--accent)]/10"
-                : "text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-white/[0.02]"
-            }`}
-          >
-            <span>{t.icon}</span>
-            {t.label}
-          </button>
-        ))}
+      {/* ── Tab Navigation + Refresh Badges ── */}
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className="flex items-center gap-1 bg-[var(--card)] border border-[var(--border)] rounded-xl p-1 w-fit">
+          {tabs.map(t => (
+            <button
+              key={t.id}
+              onClick={() => setActiveTab(t.id)}
+              className={`px-4 py-2 text-xs font-medium rounded-lg transition-all flex items-center gap-1.5 ${
+                activeTab === t.id
+                  ? "bg-[var(--accent)]/15 text-[var(--accent-light)] shadow-sm shadow-[var(--accent)]/10"
+                  : "text-[var(--muted)] hover:text-[var(--foreground)] hover:bg-white/[0.02]"
+              }`}
+            >
+              <span>{t.icon}</span>
+              {t.label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-3 ml-1">
+          <RefreshBadge intervalSec={15} lastUpdated={lastFastUpdate} label="stats" />
+          <RefreshBadge intervalSec={30} lastUpdated={lastSlowUpdate} label="programas" />
+          <RefreshBadge intervalSec={5} lastUpdated={lastMetricsUpdate} label="CPU/RAM" />
+        </div>
       </div>
 
       {activeTab === "overview" && (

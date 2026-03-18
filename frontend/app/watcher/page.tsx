@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
+import { RefreshBadge } from "@/components/RefreshBadge";
 import {
   fetchWatcherStatus,
   triggerWatcherCheck,
@@ -30,6 +31,7 @@ export default function WatcherPage() {
   const [status, setStatus] = useState<WatcherStatusResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [results, setResults] = useState<WatcherCheckResponse | null>(null);
+  const [lastUpdated, setLastUpdated] = useState(0);
   const [selectedPlatform, setSelectedPlatform] = useState<string | null>(null);
   const [platformPrograms, setPlatformPrograms] = useState<Record<string, unknown>[] | null>(null);
   const [programsLoading, setProgramsLoading] = useState(false);
@@ -40,6 +42,7 @@ export default function WatcherPage() {
     try {
       const s = await fetchWatcherStatus();
       setStatus(s);
+      setLastUpdated(Date.now());
     } catch (e) {
       console.error("[WATCHER] Erro ao carregar status:", e);
     }
@@ -113,6 +116,7 @@ export default function WatcherPage() {
                   ● ATIVO
                 </span>
               )}
+              <RefreshBadge intervalSec={20} lastUpdated={lastUpdated} />
             </h1>
             <p className="text-[11px] text-[var(--muted)] mt-1">
               Scraping ativo das APIs oficiais de plataformas de bug bounty —
