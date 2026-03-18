@@ -578,7 +578,9 @@ class BugHuntScraper(BaseScraper):
 
     # ── Captcha solving (CapSolver SDK — madmax-hunter compat) ──────
     def _solve_captcha_capsolver(self) -> str:
-        """Solve reCAPTCHA via CapSolver Python SDK (3 attempts)."""
+        """Solve reCAPTCHA via CapSolver Python SDK.
+        Fluxo: 1) AntiCloudflare p/ cf_clearance → 2) ReCaptchaV2 com cookies.
+        """
         api_key = os.getenv("CAPSOLVER_API_KEY", "")
         if not api_key:
             logger.info("[BH-SCRAPER] CAPSOLVER_API_KEY not set — skipping")
@@ -591,26 +593,48 @@ class BugHuntScraper(BaseScraper):
             logger.error("[BH-SCRAPER] capsolver package not installed")
             return ""
 
-        # SPA: /login returns 404 server-side, use root URL for CapSolver
-        login_url = self.ADMIN
+        # 1) Obter cf_clearance via AntiCloudflareTask
+        cf_cookies = ""
+        ua = ""
+        try:
+            logger.info("[BH-SCRAPER] CapSolver AntiCloudflare para %s...", self.ADMIN)
+            cf_sol = capsolver.solve({
+                "type": "AntiCloudflareTask",
+                "websiteURL": self.ADMIN,
+                "proxy": "",
+            })
+            cf_cookies = cf_sol.get("cookies", "")
+            ua = cf_sol.get("userAgent", "")
+            if cf_cookies:
+                logger.warning("[BH-SCRAPER] cf_clearance obtido OK")
+                # Injetar cookies na sessão
+                for part in cf_cookies.split(";"):
+                    part = part.strip()
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        self.session.cookies.set(k.strip(), v.strip(), domain="admin.bughunt.com.br")
+                        self.session.cookies.set(k.strip(), v.strip(), domain="auth.bughunt.com.br")
+        except Exception as exc:
+            logger.warning("[BH-SCRAPER] AntiCloudflare falhou: %s — tentando direto", exc)
 
-        for attempt in range(1, 4):
+        # 2) Resolver reCAPTCHA v2
+        for attempt in range(1, 3):
             try:
-                logger.info("[BH-SCRAPER] CapSolver attempt %d...", attempt)
-                sol = capsolver.solve({
+                logger.info("[BH-SCRAPER] CapSolver ReCaptchaV2 attempt %d...", attempt)
+                task: dict = {
                     "type": "ReCaptchaV2TaskProxyLess",
-                    "websiteURL": login_url,
+                    "websiteURL": self.ADMIN,
                     "websiteKey": self.SITE_KEY,
-                })
+                }
+                if ua:
+                    task["userAgent"] = ua
+                sol = capsolver.solve(task)
                 token = sol.get("gRecaptchaResponse", "")
                 if token:
-                    logger.info("[BH-SCRAPER] CapSolver OK.")
+                    logger.warning("[BH-SCRAPER] ReCaptchaV2 OK len=%d", len(token))
                     return token
             except Exception as exc:
-                logger.warning(
-                    "[BH-SCRAPER] CapSolver attempt %d failed: %s",
-                    attempt, exc,
-                )
+                logger.warning("[BH-SCRAPER] ReCaptchaV2 attempt %d failed: %s", attempt, exc)
                 time.sleep(3)
         return ""
 
