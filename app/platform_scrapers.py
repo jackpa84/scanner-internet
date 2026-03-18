@@ -612,12 +612,16 @@ class BugHuntScraper(BaseScraper):
             "Chrome/124.0.0.0 Safari/537.36"
         )
         try:
-            # Warm up session/cookies on the frontend before hitting auth API
-            self.session.get(
-                self.ADMIN,
-                headers={"User-Agent": UA, "Accept": "text/html,*/*", "Accept-Language": "pt-BR,pt;q=0.9"},
-                timeout=15,
-            )
+            # Warm up session/cookies — both frontend and auth subdomain
+            for warmup_url in (self.ADMIN, self.AUTH_URL.replace("/login", "")):
+                try:
+                    self.session.get(
+                        warmup_url,
+                        headers={"User-Agent": UA, "Accept": "text/html,*/*", "Accept-Language": "pt-BR,pt;q=0.9"},
+                        timeout=15,
+                    )
+                except Exception:
+                    pass
             resp = self.session.post(
                 self.AUTH_URL,
                 json={
