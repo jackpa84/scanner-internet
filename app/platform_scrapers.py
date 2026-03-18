@@ -561,6 +561,18 @@ class BugHuntScraper(BaseScraper):
     ADMIN = "https://admin.bughunt.com.br"
     SITE_KEY = "6Lc7qxMqAAAAABcDOk8ypkP69TL7WK44Pur7bdq7"
 
+    def __init__(self, config=None):
+        super().__init__(config)
+        # Substituir sessão por cloudscraper para bypass do Cloudflare
+        try:
+            import cloudscraper  # type: ignore
+            self.session = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            )
+            logger.info("[BH-SCRAPER] cloudscraper session criada")
+        except ImportError:
+            logger.warning("[BH-SCRAPER] cloudscraper não instalado — usando requests")
+
     def is_configured(self) -> bool:
         return bool(BUGHUNT_EMAIL and BUGHUNT_PASSWORD)
 
@@ -612,16 +624,6 @@ class BugHuntScraper(BaseScraper):
             "Chrome/124.0.0.0 Safari/537.36"
         )
         try:
-            # Warm up session/cookies — both frontend and auth subdomain
-            for warmup_url in (self.ADMIN, self.AUTH_URL.replace("/login", "")):
-                try:
-                    self.session.get(
-                        warmup_url,
-                        headers={"User-Agent": UA, "Accept": "text/html,*/*", "Accept-Language": "pt-BR,pt;q=0.9"},
-                        timeout=15,
-                    )
-                except Exception:
-                    pass
             resp = self.session.post(
                 self.AUTH_URL,
                 json={
