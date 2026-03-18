@@ -580,6 +580,89 @@ def api_db_activity(limit: int = 30):
     return {"activity": activity, "counts": counts}
 
 
+@app.get("/api/db/stats")
+def api_db_stats():
+    """Stats completas das collections Redis e status MongoDB."""
+    r = get_redis()
+    redis_info: dict = {}
+    try:
+        info = r.info()
+        redis_info = {
+            "version": info.get("redis_version", ""),
+            "uptime_seconds": info.get("uptime_in_seconds", 0),
+            "connected_clients": info.get("connected_clients", 0),
+            "used_memory_human": info.get("used_memory_human", ""),
+            "used_memory_peak_human": info.get("used_memory_peak_human", ""),
+            "maxmemory_human": info.get("maxmemory_human", "0B"),
+            "mem_fragmentation_ratio": info.get("mem_fragmentation_ratio", 0),
+            "total_commands_processed": info.get("total_commands_processed", 0),
+            "instantaneous_ops_per_sec": info.get("instantaneous_ops_per_sec", 0),
+            "keyspace_hits": info.get("keyspace_hits", 0),
+            "keyspace_misses": info.get("keyspace_misses", 0),
+            "total_keys": r.dbsize(),
+        }
+    except Exception as e:
+        redis_info = {"error": str(e)}
+
+    collections: list[dict] = []
+    collection_defs = [
+        ("scan_results",      get_scan_results,      5000),
+        ("vuln_results",      get_vuln_results,       2000),
+        ("bounty_programs",   get_bounty_programs,    None),
+        ("bounty_targets",    get_bounty_targets,     None),
+        ("bounty_changes",    get_bounty_changes,     1000),
+        ("submitted_reports", get_submitted_reports,  500),
+        ("roi_earnings",      get_roi_earnings,       1000),
+    ]
+    for name, getter, max_docs in collection_defs:
+        try:
+            col = getter()
+            count = col.estimated_document_count()
+            # Tamanho dos dados (soma dos bytes dos valores no hash Redis)
+            dk = f"c:{name}:d"
+            try:
+                raw_size = sum(len(v) for v in r.hvals(dk)) if count > 0 else 0
+            except Exception:
+                raw_size = 0
+            collections.append({
+                "name": name,
+                "count": count,
+                "max_docs": max_docs,
+                "size_bytes": raw_size,
+                "usage_pct": round(count / max_docs * 100, 1) if max_docs else None,
+            })
+        except Exception as e:
+            collections.append({"name": name, "count": 0, "error": str(e)})
+
+    mongo_status: dict = {}
+    try:
+        from app.database import get_client, _mongodb_ok
+        mongo_status["connected"] = _mongodb_ok
+        if _mongodb_ok:
+            client = get_client()
+            db = client.get_default_database()
+            mongo_status["database"] = db.name
+            mongo_status["collections"] = []
+            for cname in db.list_collection_names():
+                stats = db.command("collStats", cname)
+                mongo_status["collections"].append({
+                    "name": cname,
+                    "count": stats.get("count", 0),
+                    "size_bytes": stats.get("size", 0),
+                    "storage_size_bytes": stats.get("storageSize", 0),
+                    "avg_obj_size": int(stats.get("avgObjSize", 0)),
+                    "indexes": stats.get("nindexes", 0),
+                })
+    except Exception as e:
+        mongo_status = {"connected": False, "error": str(e)}
+
+    return {
+        "redis": redis_info,
+        "collections": collections,
+        "mongo": mongo_status,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Vuln scan endpoints
 # ---------------------------------------------------------------------------

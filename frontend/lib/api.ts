@@ -1203,3 +1203,54 @@ export const generateReports = (opts?: { limit?: number; severity_threshold?: st
 
 export const fetchH1Me = () =>
   apiFetch<{ ok: boolean; username: string; programs: number }>('/api/hackerone/me', 30000);
+
+// ── DB Stats ─────────────────────────────────────────────────────────────────
+
+export interface RedisInfo {
+  version: string;
+  uptime_seconds: number;
+  connected_clients: number;
+  used_memory_human: string;
+  used_memory_peak_human: string;
+  maxmemory_human: string;
+  mem_fragmentation_ratio: number;
+  total_commands_processed: number;
+  instantaneous_ops_per_sec: number;
+  keyspace_hits: number;
+  keyspace_misses: number;
+  total_keys: number;
+  error?: string;
+}
+
+export interface CollectionStat {
+  name: string;
+  count: number;
+  max_docs: number | null;
+  size_bytes: number;
+  usage_pct: number | null;
+  error?: string;
+}
+
+export interface MongoCollectionStat {
+  name: string;
+  count: number;
+  size_bytes: number;
+  storage_size_bytes: number;
+  avg_obj_size: number;
+  indexes: number;
+}
+
+export interface MongoStatus {
+  connected: boolean;
+  database?: string;
+  collections?: MongoCollectionStat[];
+  error?: string;
+}
+
+export interface DbStats {
+  redis: RedisInfo;
+  collections: CollectionStat[];
+  mongo: MongoStatus;
+}
+
+export const fetchDbStats = () => apiFetch<DbStats>('/api/db/stats');
