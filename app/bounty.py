@@ -49,6 +49,8 @@ from app.advanced_recon import (
     check_dns_zone_transfer,
     run_github_dorking,
     run_paramspider,
+    run_arjun,
+    arjun_findings_to_recon,
 )
 from app.idor_scanner import scan_target_for_idor
 from app.ssrf_scanner import scan_target_for_ssrf
@@ -68,6 +70,15 @@ logger = logging.getLogger("scanner.bounty")
 
 BOUNTY_MODE = os.getenv("BOUNTY_MODE", "true").lower() in ("1", "true", "yes")
 RECON_INTERVAL = int(os.getenv("BOUNTY_RECON_INTERVAL", "21600"))
+
+# Rate limiter para crt.sh: máximo 1 request a cada 8s globalmente
+_crtsh_lock = threading.Lock()
+_crtsh_last_request: float = 0.0
+_CRTSH_MIN_INTERVAL = float(os.getenv("CRTSH_RATE_INTERVAL", "8"))
+
+# Semáforo global: limita subprocessos pesados (subfinder/httpx/nuclei) simultâneos
+# evita contenção de GIL e sobrecarga da VM
+_subprocess_sem = threading.Semaphore(int(os.getenv("MAX_SUBPROCESS_WORKERS", "6")))
 RECON_WORKERS = int(os.getenv("BOUNTY_RECON_WORKERS", "2"))
 SUBFINDER_TIMEOUT = int(os.getenv("SUBFINDER_TIMEOUT", "300"))
 HTTPX_TIMEOUT = int(os.getenv("HTTPX_TIMEOUT", "300"))
@@ -214,27 +225,28 @@ def run_subdomain_enum(domain: str) -> list[str]:
     ]
 
     subdomains = set()
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=SUBFINDER_TIMEOUT + 30,
-        )
-        for line in result.stdout.strip().splitlines():
-            sub = line.strip().lower()
-            if sub and "." in sub:
-                subdomains.add(sub)
+    with _subprocess_sem:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=SUBFINDER_TIMEOUT + 30,
+            )
+            for line in result.stdout.strip().splitlines():
+                sub = line.strip().lower()
+                if sub and "." in sub:
+                    subdomains.add(sub)
 
-        logger.info("[BOUNTY] subfinder %s: %d subdominios", domain, len(subdomains))
+            logger.info("[BOUNTY] subfinder %s: %d subdominios", domain, len(subdomains))
 
-    except subprocess.TimeoutExpired:
-        logger.warning("[BOUNTY] subfinder timeout para %s", domain)
-        _inc_stat("errors")
-    except FileNotFoundError:
-        logger.error("[BOUNTY] subfinder nao encontrado no PATH")
-        _inc_stat("errors")
-    except Exception as e:
-        logger.error("[BOUNTY] subfinder erro: %s", e)
-        _inc_stat("errors")
+        except subprocess.TimeoutExpired:
+            logger.warning("[BOUNTY] subfinder timeout para %s", domain)
+            _inc_stat("errors")
+        except FileNotFoundError:
+            logger.error("[BOUNTY] subfinder nao encontrado no PATH")
+            _inc_stat("errors")
+        except Exception as e:
+            logger.error("[BOUNTY] subfinder erro: %s", e)
+            _inc_stat("errors")
 
     return sorted(subdomains)
 
@@ -242,35 +254,59 @@ def run_subdomain_enum(domain: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # crt.sh — Certificate Transparency subdomain enumeration
 # ---------------------------------------------------------------------------
+def _crtsh_rate_limit() -> None:
+    """Garante intervalo mínimo entre requests ao crt.sh."""
+    global _crtsh_last_request
+    with _crtsh_lock:
+        now = time.time()
+        elapsed = now - _crtsh_last_request
+        if elapsed < _CRTSH_MIN_INTERVAL:
+            time.sleep(_CRTSH_MIN_INTERVAL - elapsed)
+        _crtsh_last_request = time.time()
+
+
 def run_crtsh_enum(domain: str) -> list[str]:
     """Query crt.sh for subdomains via Certificate Transparency logs."""
     subdomains: set[str] = set()
-    try:
-        url = "https://crt.sh/"
-        params = {"q": f"%.{domain}", "output": "json"}
-        resp = requests.get(url, params=params, timeout=CRTSH_TIMEOUT)
-        if resp.status_code != 200:
-            logger.warning("[BOUNTY] crt.sh %s: HTTP %d", domain, resp.status_code)
+    url = "https://crt.sh/"
+    params = {"q": f"%.{domain}", "output": "json"}
+
+    for attempt in range(3):
+        _crtsh_rate_limit()
+        try:
+            resp = requests.get(url, params=params, timeout=CRTSH_TIMEOUT)
+            if resp.status_code == 429:
+                # Espera exponencial, mas volta para a fila global (outros domínios usam o tempo)
+                wait = 15 * (2 ** attempt)  # 15, 30, 60s
+                logger.warning("[BOUNTY] crt.sh %s: 429 aguardando %ds (tentativa %d/3)", domain, wait, attempt + 1)
+                time.sleep(wait)
+                continue
+            if resp.status_code != 200:
+                logger.warning("[BOUNTY] crt.sh %s: HTTP %d", domain, resp.status_code)
+                return []
+
+            entries = resp.json()
+            for entry in entries:
+                name_value = entry.get("name_value", "")
+                for name in name_value.split("\n"):
+                    name = name.strip().lower()
+                    if name.startswith("*."):
+                        name = name[2:]
+                    if name and "." in name and not name.startswith("."):
+                        subdomains.add(name)
+
+            logger.info("[BOUNTY] crt.sh %s: %d subdominios", domain, len(subdomains))
+            _inc_stat("crtsh_subdomains", len(subdomains))
+            return sorted(subdomains)
+
+        except requests.RequestException as e:
+            logger.warning("[BOUNTY] crt.sh erro para %s: %s", domain, e)
+            return []
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("[BOUNTY] crt.sh resposta invalida para %s", domain)
             return []
 
-        entries = resp.json()
-        for entry in entries:
-            name_value = entry.get("name_value", "")
-            for name in name_value.split("\n"):
-                name = name.strip().lower()
-                if name.startswith("*."):
-                    name = name[2:]
-                if name and "." in name and not name.startswith("."):
-                    subdomains.add(name)
-
-        logger.info("[BOUNTY] crt.sh %s: %d subdominios", domain, len(subdomains))
-        _inc_stat("crtsh_subdomains", len(subdomains))
-
-    except requests.RequestException as e:
-        logger.warning("[BOUNTY] crt.sh erro para %s: %s", domain, e)
-    except (json.JSONDecodeError, ValueError):
-        logger.warning("[BOUNTY] crt.sh resposta invalida para %s", domain)
-
+    logger.warning("[BOUNTY] crt.sh %s: esgotadas tentativas, pulando", domain)
     return sorted(subdomains)
 
 
@@ -470,19 +506,33 @@ def resolve_dns(subdomains: list[str]) -> dict[str, list[str]]:
 # Reverse DNS sweep — descobre subdomínios adicionais a partir dos IPs
 # ---------------------------------------------------------------------------
 def reverse_dns_sweep(ips: list[str]) -> dict[str, str]:
-    """Run reverse DNS on a list of IPs.
+    """Run reverse DNS on a list of IPs in parallel.
 
     Returns {ip: hostname} for IPs that have PTR records.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     results: dict[str, str] = {}
-    for ip in ips:
+
+    def _rdns_one(ip: str) -> tuple[str, str]:
         try:
             hostname, _, _ = socket.gethostbyaddr(ip)
             hostname = hostname.lower().strip()
             if hostname and "." in hostname:
-                results[ip] = hostname
+                return ip, hostname
         except (socket.herror, socket.gaierror, OSError):
-            continue
+            pass
+        return ip, ""
+
+    workers = min(100, max(20, len(ips)))
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="rdns") as ex:
+        for fut in as_completed([ex.submit(_rdns_one, ip) for ip in ips]):
+            try:
+                ip, hostname = fut.result()
+                if hostname:
+                    results[ip] = hostname
+            except Exception:
+                pass
 
     if results:
         logger.info("[BOUNTY] Reverse DNS: %d/%d IPs com PTR", len(results), len(ips))
@@ -569,41 +619,42 @@ def _httpx_batch(batch: list[str]) -> list[dict[str, Any]]:
         "-threads", "50",
     ]
 
-    try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True,
-            timeout=HTTPX_TIMEOUT,
-        )
-
-        for line in result.stdout.strip().splitlines():
-            if not line.strip():
-                continue
-            try:
-                obj = json.loads(line)
-                alive.append({
-                    "url": obj.get("url", ""),
-                    "host": obj.get("host", obj.get("input", "")),
-                    "status_code": obj.get("status_code", obj.get("status-code", 0)),
-                    "title": obj.get("title", ""),
-                    "tech": obj.get("tech", []) or [],
-                    "cdn": obj.get("cdn", False),
-                    "content_length": obj.get("content_length", obj.get("content-length", 0)),
-                    "webserver": obj.get("webserver", ""),
-                    "scheme": obj.get("scheme", ""),
-                })
-            except json.JSONDecodeError:
-                continue
-    except subprocess.TimeoutExpired:
-        logger.warning("[BOUNTY] httpx batch timeout (%d targets)", len(batch))
-    except FileNotFoundError:
-        logger.error("[BOUNTY] httpx nao encontrado no PATH")
-    except Exception as e:
-        logger.error("[BOUNTY] httpx batch erro: %s", e)
-    finally:
+    with _subprocess_sem:
         try:
-            os.unlink(targets_file)
-        except OSError:
-            pass
+            result = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=HTTPX_TIMEOUT,
+            )
+
+            for line in result.stdout.strip().splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                    alive.append({
+                        "url": obj.get("url", ""),
+                        "host": obj.get("host", obj.get("input", "")),
+                        "status_code": obj.get("status_code", obj.get("status-code", 0)),
+                        "title": obj.get("title", ""),
+                        "tech": obj.get("tech", []) or [],
+                        "cdn": obj.get("cdn", False),
+                        "content_length": obj.get("content_length", obj.get("content-length", 0)),
+                        "webserver": obj.get("webserver", ""),
+                        "scheme": obj.get("scheme", ""),
+                    })
+                except json.JSONDecodeError:
+                    continue
+        except subprocess.TimeoutExpired:
+            logger.warning("[BOUNTY] httpx batch timeout (%d targets)", len(batch))
+        except FileNotFoundError:
+            logger.error("[BOUNTY] httpx nao encontrado no PATH")
+        except Exception as e:
+            logger.error("[BOUNTY] httpx batch erro: %s", e)
+        finally:
+            try:
+                os.unlink(targets_file)
+            except OSError:
+                pass
 
     return alive
 
@@ -952,7 +1003,8 @@ def run_katana_crawl(urls: list[str], max_urls: int = 200) -> list[str]:
             "-kf", "all",
             "-ef", "css,png,jpg,jpeg,gif,svg,ico,woff,woff2,ttf,eot",
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KATANA_TIMEOUT + 30)
+        with _subprocess_sem:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=KATANA_TIMEOUT + 30)
         found = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         os.unlink(input_file)
         return found[:max_urls]
@@ -971,8 +1023,15 @@ def run_katana_crawl(urls: list[str], max_urls: int = 200) -> list[str]:
 def run_gau(domain: str, max_urls: int = 300) -> list[str]:
     """Fetch known URLs for a domain from Wayback, Common Crawl, OTX."""
     try:
-        cmd = ["gau", "--threads", "3", "--timeout", str(GAU_TIMEOUT), "--subs", domain]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=GAU_TIMEOUT + 15)
+        # --providers limita às fontes mais rápidas; --retries 0 falha rápido
+        cmd = [
+            "gau", "--threads", "3", "--timeout", str(GAU_TIMEOUT),
+            "--providers", "wayback,commoncrawl",
+            "--retries", "0",
+            "--subs", domain,
+        ]
+        with _subprocess_sem:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=GAU_TIMEOUT + 5)
         urls = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         interesting = [u for u in urls if any(ext in u for ext in
             [".js", ".json", ".xml", ".php", ".asp", ".jsp", ".env", ".config",
@@ -1221,13 +1280,23 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         previous_subdomains.add(t["domain"])
 
     try:
-        # --- Etapa 2: Subdomain enumeration (7 sources in parallel) ---
+        # --- Etapa 2: Subdomain enumeration (7 fontes × N domínios em paralelo) ---
         logger.info("[RECON] [2/15] Subdomain enum: 7 fontes para %d dominio(s)...", len(root_domains))
         t0 = time.time()
         all_subdomains: set[str] = set()
+        from concurrent.futures import ThreadPoolExecutor as _TPE, as_completed as _ac
+        if len(root_domains) > 1:
+            with _TPE(max_workers=min(len(root_domains), 4), thread_name_prefix="enum") as _pool:
+                _futs = {_pool.submit(run_all_subdomain_sources, d): d for d in root_domains}
+                for _f in _ac(_futs):
+                    try:
+                        all_subdomains.update(_f.result())
+                    except Exception:
+                        pass
+        else:
+            for domain in root_domains:
+                all_subdomains.update(run_all_subdomain_sources(domain))
         for domain in root_domains:
-            subs = run_all_subdomain_sources(domain)
-            all_subdomains.update(subs)
             all_subdomains.add(domain)
         logger.info("[RECON] [2/15] Enum completa: %d subdominios unicos em %.1fs",
                      len(all_subdomains), time.time() - t0)
@@ -1301,17 +1370,26 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         logger.info("[RECON] [8/15] httpx completo: %d/%d vivos em %.1fs",
                      len(alive_hosts), len(resolved_hosts), time.time() - t0)
 
-        # --- Etapa 9: Security checks ---
+        # --- Etapa 9: Security checks (paralelo por host) ---
         logger.info("[RECON] [9/15] Security checks: analisando %d hosts vivos...", len(httpx_by_host))
         t0 = time.time()
-        recon_checks_by_host = {}
-        for i, (host, data) in enumerate(httpx_by_host.items(), 1):
-            recon_checks_by_host[host] = _recon_security_checks(data.get("url", ""), data)
-            findings = recon_checks_by_host[host].get("total_findings", 0)
-            high = recon_checks_by_host[host].get("high", 0)
-            if findings > 0:
-                logger.info("[RECON]        [%d/%d] %s → %d achados (high=%d)",
-                            i, len(httpx_by_host), host, findings, high)
+        recon_checks_by_host: dict[str, Any] = {}
+        _sec_workers = min(len(httpx_by_host), int(os.getenv("SECURITY_CHECK_WORKERS", "20")))
+        def _check_host(item: tuple) -> tuple[str, dict]:
+            _host, _data = item
+            return _host, _recon_security_checks(_data.get("url", ""), _data)
+        from concurrent.futures import ThreadPoolExecutor as _STPE, as_completed as _sac
+        with _STPE(max_workers=_sec_workers, thread_name_prefix="secchk") as _sp:
+            _sfuts = {_sp.submit(_check_host, item): item[0] for item in httpx_by_host.items()}
+            for _sf in _sac(_sfuts):
+                try:
+                    _h, _res = _sf.result()
+                    recon_checks_by_host[_h] = _res
+                    if _res.get("total_findings", 0) > 0:
+                        logger.info("[RECON]        %s → %d achados (high=%d)",
+                                    _h, _res.get("total_findings", 0), _res.get("high", 0))
+                except Exception:
+                    pass
         total_findings = sum(v.get("total_findings", 0) for v in recon_checks_by_host.values())
         total_high = sum(v.get("high", 0) for v in recon_checks_by_host.values())
         logger.info("[RECON] [9/15] Security checks completo: %d achados (%d HIGH) em %.1fs",
@@ -1335,21 +1413,31 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         else:
             logger.info("[RECON] [10/15] HTTP Port Scanner: desabilitado ou sem hosts")
 
-        # --- Etapa 11: Wayback Machine + ParamSpider ---
+        # --- Etapa 11: Wayback Machine + ParamSpider (paralelo por domínio) ---
         logger.info("[RECON] [11/15] Wayback + ParamSpider: buscando URLs e parametros...")
         t0 = time.time()
         wayback_urls: dict[str, list[str]] = {}
         paramspider_data: dict[str, dict] = {}
-        for domain in root_domains[:3]:
+        _wb_domains = root_domains[:3]
+        def _run_wb_ps(domain: str) -> tuple[str, list, dict]:
             wb = run_wayback_enum(domain)
-            if wb:
-                wayback_urls[domain] = wb
+            ps: dict = {}
             try:
                 ps = run_paramspider(domain)
-                if ps.get("params"):
-                    paramspider_data[domain] = ps
             except Exception:
                 pass
+            return domain, wb or [], ps
+        from concurrent.futures import ThreadPoolExecutor as _WBTPE, as_completed as _wbac
+        with _WBTPE(max_workers=len(_wb_domains) or 1, thread_name_prefix="wbps") as _wp:
+            for _wbf in _wbac([_wp.submit(_run_wb_ps, d) for d in _wb_domains]):
+                try:
+                    _d, _wb, _ps = _wbf.result()
+                    if _wb:
+                        wayback_urls[_d] = _wb
+                    if _ps.get("params"):
+                        paramspider_data[_d] = _ps
+                except Exception:
+                    pass
         total_wb = sum(len(v) for v in wayback_urls.values())
         total_params = sum(len(v.get("params", [])) for v in paramspider_data.values())
         logger.info("[RECON] [11/15] Wayback: %d URLs | ParamSpider: %d params em %.1fs",
@@ -1387,17 +1475,37 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             logger.info("[RECON] [12b/18] Katana: %d endpoints descobertos em %.1fs",
                          len(katana_urls), time.time() - t0)
 
-        # --- Etapa 12c: GAU — GetAllUrls ---
+        # --- Etapa 12c: GAU — GetAllUrls (paralelo por domínio) ---
         gau_urls: list[str] = []
         logger.info("[RECON] [12c/18] GAU: buscando URLs conhecidas...")
         t0 = time.time()
-        for domain in root_domains[:3]:
-            gau_result = run_gau(domain)
-            gau_urls.extend(gau_result)
+        _gau_domains = root_domains[:3]
+        from concurrent.futures import ThreadPoolExecutor as _GAUTPE, as_completed as _gauac
+        with _GAUTPE(max_workers=len(_gau_domains) or 1, thread_name_prefix="gau") as _gp:
+            for _gf in _gauac([_gp.submit(run_gau, d) for d in _gau_domains]):
+                try:
+                    gau_urls.extend(_gf.result())
+                except Exception:
+                    pass
         logger.info("[RECON] [12c/18] GAU: %d URLs interessantes em %.1fs",
                      len(gau_urls), time.time() - t0)
 
-        # --- Etapa 12d: JS Secret Extraction ---
+        # --- Etapa 12d: Arjun — descoberta de parâmetros ocultos ---
+        arjun_results: list[dict] = []
+        if os.getenv("ARJUN_ENABLED", "true").lower() in ("1", "true", "yes"):
+            # Prioriza URLs com endpoints dinâmicos (katana > gau)
+            arjun_targets = [
+                u for u in (katana_urls + gau_urls)
+                if "?" not in u  # sem params já visíveis — arjun vai descobrir novos
+            ]
+            if arjun_targets:
+                logger.info("[RECON] [12d/18] Arjun: descoberta de params em %d endpoints...", len(arjun_targets))
+                t0 = time.time()
+                arjun_results = run_arjun(arjun_targets)
+                logger.info("[RECON] [12d/18] Arjun: %d endpoints com params ocultos em %.1fs",
+                             len(arjun_results), time.time() - t0)
+
+        # --- Etapa 12e: JS Secret Extraction ---
         all_discovered_urls = katana_urls + gau_urls
         js_secrets: list[dict] = []
         if all_discovered_urls:
@@ -1414,7 +1522,7 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         race_findings: list[dict] = []
 
         if alive_hosts and all_discovered_urls:
-            logger.info("[RECON] [13/22] Advanced vuln scans (IDOR, SSRF, GraphQL, Race)...")
+            logger.info("[RECON] [13/22] Advanced vuln scans (IDOR, SSRF, GraphQL, Race) — paralelo...")
             t0 = time.time()
 
             callback_host = None
@@ -1428,44 +1536,61 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
                 except Exception:
                     pass
 
-            for host in sorted(alive_hosts)[:15]:
-                host_crawled = [u for u in all_discovered_urls if host in u]
-                host_wb = []
+            # Pré-computa contexto por host
+            _scan_hosts = sorted(alive_hosts)[:15]
+            def _host_context(host: str) -> dict:
+                hd = httpx_by_host.get(host)
+                hc = [u for u in all_discovered_urls if host in u]
+                hw: list = []
                 for d, urls in wayback_urls.items():
                     if host.endswith(d) or host == d:
-                        host_wb = urls
-                        break
-                ps_urls = []
+                        hw = urls; break
+                hp: list = []
                 for d, ps in paramspider_data.items():
                     if host.endswith(d) or host == d:
-                        ps_urls = ps.get("urls_with_params", [])
-                        break
+                        hp = ps.get("urls_with_params", []); break
+                return {"host": host, "crawled": hc, "wb": hw, "ps": hp,
+                        "url": (hd.get("url") if hd else None) or f"https://{host}"}
 
-                try:
-                    idor_res = scan_target_for_idor(host, host_crawled, host_wb)
-                    idor_findings.extend(idor_res)
-                except Exception as e:
-                    logger.debug("[RECON] IDOR scan error on %s: %s", host, e)
+            def _scan_one_host(ctx: dict) -> dict:
+                host = ctx["host"]
+                res = {"idor": [], "ssrf": [], "gql": [], "race": []}
+                from concurrent.futures import ThreadPoolExecutor as _ATPE, as_completed as _aac
+                def _idor():
+                    try: return scan_target_for_idor(host, ctx["crawled"], ctx["wb"])
+                    except Exception: return []
+                def _ssrf():
+                    try: return scan_target_for_ssrf(host, ctx["crawled"], ctx["wb"], ctx["ps"], callback_host)
+                    except Exception: return []
+                def _gql():
+                    try: return scan_graphql(ctx["url"])
+                    except Exception: return []
+                def _race():
+                    try: return scan_target_for_race(host, ctx["crawled"], ctx["wb"])
+                    except Exception: return []
+                # 4 tipos de scan em paralelo por host
+                with _ATPE(max_workers=4, thread_name_prefix="advscan") as _ap:
+                    _fmap = {_ap.submit(_idor): "idor", _ap.submit(_ssrf): "ssrf",
+                             _ap.submit(_gql): "gql", _ap.submit(_race): "race"}
+                    for _af in _aac(_fmap):
+                        try: res[_fmap[_af]] = _af.result() or []
+                        except Exception: pass
+                return res
 
-                try:
-                    ssrf_res = scan_target_for_ssrf(host, host_crawled, host_wb, ps_urls, callback_host)
-                    ssrf_findings.extend(ssrf_res)
-                except Exception as e:
-                    logger.debug("[RECON] SSRF scan error on %s: %s", host, e)
-
-                hd = httpx_by_host.get(host)
-                base_url = (hd.get("url") if hd else None) or f"https://{host}"
-                try:
-                    gql_res = scan_graphql(base_url)
-                    graphql_findings.extend(gql_res)
-                except Exception as e:
-                    logger.debug("[RECON] GraphQL scan error on %s: %s", host, e)
-
-                try:
-                    race_res = scan_target_for_race(host, host_crawled, host_wb)
-                    race_findings.extend(race_res)
-                except Exception as e:
-                    logger.debug("[RECON] Race scan error on %s: %s", host, e)
+            # Todos os hosts em paralelo
+            _adv_workers = min(len(_scan_hosts), int(os.getenv("ADVANCED_SCAN_WORKERS", "8")))
+            from concurrent.futures import ThreadPoolExecutor as _ADVTPE, as_completed as _advac
+            with _ADVTPE(max_workers=_adv_workers, thread_name_prefix="advhost") as _advp:
+                _ctxs = [_host_context(h) for h in _scan_hosts]
+                for _advf in _advac([_advp.submit(_scan_one_host, ctx) for ctx in _ctxs]):
+                    try:
+                        _r = _advf.result()
+                        idor_findings.extend(_r["idor"])
+                        ssrf_findings.extend(_r["ssrf"])
+                        graphql_findings.extend(_r["gql"])
+                        race_findings.extend(_r["race"])
+                    except Exception:
+                        pass
 
             all_advanced = idor_findings + ssrf_findings + graphql_findings + race_findings
             logger.info("[RECON] [13/22] Advanced scans: IDOR=%d SSRF=%d GraphQL=%d Race=%d (%.1fs)",
@@ -1479,26 +1604,29 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
         logger.info("[RECON] [14/22] Change detection...")
         changes = _detect_and_save_changes(oid, prog_name, set(scoped), previous_subdomains)
 
-        # --- Etapa 14: Save to MongoDB ---
-        logger.info("[RECON] [14/15] Salvando %d targets no MongoDB...", len(scoped))
+        # --- Etapa 14: Save to Redis (paralelo) ---
+        logger.info("[RECON] [14/15] Salvando %d targets...", len(scoped))
         t0 = time.time()
         now = datetime.utcnow()
         saved = 0
-        for sub in scoped:
+        _new_subs_set = set(changes.get("new_subdomains", []))
+
+        def _build_target_doc(sub: str) -> dict:
             ips = dns_map.get(sub, [])
             is_alive = sub in alive_hosts
             httpx_data = httpx_by_host.get(sub)
-            recon_checks = recon_checks_by_host.get(sub, {"checked": False, "total_findings": 0, "findings": []})
+            recon_checks = dict(recon_checks_by_host.get(sub, {"checked": False, "total_findings": 0, "findings": []}))
             http_scanner = http_scanner_by_host.get(sub, [])
-            is_new = sub in changes.get("new_subdomains", [])
+            is_new = sub in _new_subs_set
 
             # Inject all extra findings into recon_checks
             sub_idor = [f for f in idor_findings if sub in f.get("evidence", "") or sub in f.get("original_url", "")]
             sub_ssrf = [f for f in ssrf_findings if sub in f.get("evidence", "") or sub in f.get("test_url", "")]
             sub_gql = [f for f in graphql_findings if sub in f.get("evidence", "")]
             sub_race = [f for f in race_findings if sub in f.get("url", "") or sub in f.get("evidence", "")]
+            sub_arjun = arjun_findings_to_recon([r for r in arjun_results if sub in r.get("url", "")])
             extra_findings = (list(zone_transfer_findings) + list(github_findings) + list(js_secrets)
-                              + sub_idor + sub_ssrf + sub_gql + sub_race)
+                              + sub_idor + sub_ssrf + sub_gql + sub_race + sub_arjun)
             if extra_findings and is_alive:
                 if not isinstance(recon_checks.get("findings"), list):
                     recon_checks["findings"] = []
@@ -1525,29 +1653,55 @@ def recon_pipeline(program_id: str) -> dict[str, Any]:
             # Katana + GAU URLs for this subdomain
             crawled_for_sub = [u for u in katana_urls + gau_urls if sub in u][:30]
 
+            wb_for_sub = next((urls for d, urls in wayback_urls.items() if sub.endswith(d) or sub == d), [])
+            ps_for_sub = next((ps for d, ps in paramspider_data.items() if sub.endswith(d) or sub == d), {})
+            crawled_for_sub = [u for u in katana_urls + gau_urls if sub in u][:30]
+            return {
+                "sub": sub, "ips": ips, "is_alive": is_alive, "httpx_data": httpx_data,
+                "recon_checks": recon_checks, "http_scanner": http_scanner,
+                "wb_for_sub": wb_for_sub[:20], "crawled_for_sub": crawled_for_sub,
+                "ps_for_sub": ps_for_sub, "is_new": is_new,
+            }
+
+        def _save_target(sub: str) -> bool:
+            d = _build_target_doc(sub)
+            rc = d["recon_checks"]
+            sub_idor = [f for f in idor_findings if sub in f.get("evidence", "") or sub in f.get("original_url", "")]
+            sub_ssrf = [f for f in ssrf_findings if sub in f.get("evidence", "") or sub in f.get("test_url", "")]
+            sub_gql  = [f for f in graphql_findings if sub in f.get("evidence", "")]
+            sub_race = [f for f in race_findings if sub in f.get("url", "") or sub in f.get("evidence", "")]
+            sub_arjun = arjun_findings_to_recon([r for r in arjun_results if sub in r.get("url", "")])
+            extra = list(zone_transfer_findings) + list(github_findings) + list(js_secrets) + sub_idor + sub_ssrf + sub_gql + sub_race + sub_arjun
+            if extra and d["is_alive"]:
+                if not isinstance(rc.get("findings"), list):
+                    rc["findings"] = []
+                for ef in extra:
+                    rc["findings"].append(ef)
+                    sev = ef.get("severity", "low")
+                    rc[sev] = rc.get(sev, 0) + 1
+                    rc["risk_score"] = min(100, rc.get("risk_score", 0) + {"high": 25, "medium": 12, "low": 5}.get(sev, 0))
+                rc["total_findings"] = len(rc["findings"])
             targets_col.update_one(
                 {"program_id": oid, "domain": sub},
-                {
-                    "$set": {
-                        "program_id": oid,
-                        "domain": sub,
-                        "ips": ips,
-                        "alive": is_alive,
-                        "status": "probed" if is_alive else "resolved" if ips else "discovered",
-                        "httpx": httpx_data or {},
-                        "recon_checks": recon_checks,
-                        "http_scanner": http_scanner,
-                        "wayback_urls": wb_for_sub[:20],
-                        "crawled_urls": crawled_for_sub,
-                        "paramspider": ps_for_sub,
-                        "is_new": is_new,
-                        "last_recon": now,
-                    }
-                },
+                {"$set": {
+                    "program_id": oid, "domain": sub,
+                    "ips": d["ips"], "alive": d["is_alive"],
+                    "status": "probed" if d["is_alive"] else "resolved" if d["ips"] else "discovered",
+                    "httpx": d["httpx_data"] or {}, "recon_checks": rc,
+                    "http_scanner": d["http_scanner"], "wayback_urls": d["wb_for_sub"],
+                    "crawled_urls": d["crawled_for_sub"], "paramspider": d["ps_for_sub"],
+                    "is_new": d["is_new"], "last_recon": now,
+                }},
                 upsert=True,
             )
-            saved += 1
-        logger.info("[RECON] [14/15] MongoDB: %d targets salvos em %.1fs", saved, time.time() - t0)
+            return True
+
+        from concurrent.futures import ThreadPoolExecutor as _STPE2, as_completed as _sac2
+        _save_workers = min(len(scoped), int(os.getenv("SAVE_TARGET_WORKERS", "20")))
+        with _STPE2(max_workers=_save_workers, thread_name_prefix="save") as _svp:
+            saved = sum(1 for f in _sac2([_svp.submit(_save_target, sub) for sub in scoped])
+                        if not f.exception())
+        logger.info("[RECON] [14/15] %d targets salvos em %.1fs", saved, time.time() - t0)
 
         # --- Etapa 15: Auto-queue alive targets for Nuclei ---
         logger.info("[RECON] [15/15] Nuclei auto-queue...")
@@ -2057,35 +2211,86 @@ def _auto_recon_loop() -> None:
     Priority order:
       1. Programs never scanned (no last_recon) — has_bounty first
       2. Programs with oldest last_recon that exceeded interval
+
+    RECON_WORKERS programas processados em paralelo.
     """
-    logger.info("[BOUNTY] Auto-recon ativo (intervalo=%ds)", RECON_INTERVAL)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    logger.info("[BOUNTY] Auto-recon ativo (intervalo=%ds, workers=%d)", RECON_INTERVAL, RECON_WORKERS)
+    # Ao iniciar, libera programas travados em "reconning" (container reiniciado no meio do scan)
+    try:
+        _stuck_col = get_bounty_programs()
+        stuck = list(_stuck_col.find({"status": "reconning"}))
+        if stuck:
+            for _p in stuck:
+                _stuck_col.update_one({"_id": _p["_id"]}, {"$set": {"status": "active"}})
+            logger.warning("[BOUNTY] %d programas travados em 'reconning' resetados para 'active'", len(stuck))
+    except Exception as _e:
+        logger.warning("[BOUNTY] Erro ao resetar programas travados: %s", _e)
+
     while True:
         try:
             programs_col = get_bounty_programs()
+            now = datetime.utcnow()
 
+            # Nunca escaneados: qualquer status exceto "reconning"
             never_scanned = list(programs_col.find(
-                {"status": {"$in": ["active", None]}, "last_recon": {"$exists": False}},
+                {"status": {"$nin": ["reconning"]}, "last_recon": {"$exists": False}},
             ).sort("has_bounty", -1))
 
+            # Já escaneados: qualquer status exceto "reconning"
             stale = list(programs_col.find(
-                {"status": {"$in": ["active", None]}, "last_recon": {"$exists": True}},
+                {"status": {"$nin": ["reconning"]}, "last_recon": {"$exists": True}},
             ).sort("last_recon", 1))
 
-            candidates = never_scanned + stale
+            # Diagnóstico: log de status dos programas
+            total_progs = len(never_scanned) + len(stale)
+            logger.info("[BOUNTY] Status DB: total=%d | nunca_escaneados=%d | com_last_recon=%d",
+                        total_progs, len(never_scanned), len(stale))
 
-            for prog in candidates:
+            # Erros recentes (< 1h): pula para não ficar em loop de falha
+            ERROR_COOLDOWN = 3600
+            def _should_recon(prog: dict) -> bool:
+                lr = prog.get("last_recon")
+                if not lr:
+                    return True
+                # Safety: se last_recon virou string por algum motivo, converte
+                if isinstance(lr, str):
+                    try:
+                        lr = datetime.fromisoformat(lr)
+                    except Exception:
+                        return True
+                age = (now - lr).total_seconds()
+                if age < RECON_INTERVAL:
+                    return False
+                # Programa com erro: cooldown de 1h adicional antes de retentar
+                if prog.get("status") == "error" and age < ERROR_COOLDOWN:
+                    return False
+                return True
+
+            candidates = [p for p in never_scanned + stale if _should_recon(p)]
+
+            if not candidates:
+                logger.info("[BOUNTY] Nenhum candidato para recon (total=%d). Dormindo 300s.", total_progs)
+                time.sleep(300)
+                continue
+
+            logger.info("[BOUNTY] Auto-recon: %d candidatos de %d programas (%d workers)",
+                        len(candidates), total_progs, RECON_WORKERS)
+
+            def _run_one(prog: dict) -> None:
                 pid = str(prog["_id"])
-                last = prog.get("last_recon")
-                if last:
-                    elapsed = (datetime.utcnow() - last).total_seconds()
-                    if elapsed < RECON_INTERVAL:
-                        continue
                 try:
                     recon_pipeline(pid)
                 except Exception as e:
-                    logger.error("[BOUNTY] auto-recon erro em %s: %s",
-                                 prog.get("name", "?"), e)
+                    logger.error("[BOUNTY] auto-recon erro em %s: %s", prog.get("name", "?"), e)
                     _inc_stat("errors")
+
+            with ThreadPoolExecutor(max_workers=RECON_WORKERS, thread_name_prefix="recon") as pool:
+                futures = {pool.submit(_run_one, prog): prog for prog in candidates}
+                for fut in as_completed(futures):
+                    fut.result()  # propaga exceções capturadas internamente
+
         except Exception as e:
             logger.error("[BOUNTY] auto-recon loop erro: %s", e)
 

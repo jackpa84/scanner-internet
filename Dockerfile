@@ -2,7 +2,9 @@ FROM python:3.10-slim AS builder
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir poetry
+RUN pip install --no-cache-dir poetry arjun
+
+RUN apt-get update && apt-get install -y --no-install-recommends gcc python3-dev && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml poetry.lock* ./
 
@@ -27,7 +29,6 @@ RUN apt-get update \
     && unzip -o /tmp/nuclei.zip -d /usr/local/bin/ \
     && chmod +x /usr/local/bin/nuclei \
     && rm /tmp/nuclei.zip \
-    && nuclei -ut -silent \
     && SUBFINDER_VERSION=$(wget -qO- "https://api.github.com/repos/projectdiscovery/subfinder/releases/latest" \
        | grep '"tag_name"' | head -1 | cut -d'"' -f4) \
     && wget -q "https://github.com/projectdiscovery/subfinder/releases/download/${SUBFINDER_VERSION}/subfinder_${SUBFINDER_VERSION#v}_linux_${TARGETARCH}.zip" \
@@ -80,4 +81,9 @@ ENV PYTHONOPTIMIZE=2
 
 EXPOSE 5000
 
+# Atualiza templates nuclei no startup (evita OOM no build)
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]

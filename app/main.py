@@ -3,6 +3,7 @@ import os
 import time
 import threading
 import logging
+import psutil
 import ipaddress
 import json
 import re
@@ -438,6 +439,44 @@ def api_health_workers():
         "platform_watcher": get_watcher_stats(),
         "bounty_data":      get_bounty_data_stats(),
         "program_matcher":  get_matcher_stats(),
+    }
+
+
+# ── system metrics state ─────────────────────────────────────────────────────
+_sys_last_net: psutil._common.snetio | None = None
+_sys_last_net_time: float = 0.0
+
+
+@app.get("/api/system/metrics")
+def api_system_metrics():
+    """CPU, memória e taxa de rede em tempo real."""
+    global _sys_last_net, _sys_last_net_time
+
+    cpu = psutil.cpu_percent(interval=0.1)
+    mem = psutil.virtual_memory()
+    net = psutil.net_io_counters()
+    now = time.time()
+
+    net_in_rate = 0
+    net_out_rate = 0
+    if _sys_last_net is not None and _sys_last_net_time > 0:
+        dt = now - _sys_last_net_time
+        if dt > 0:
+            net_in_rate = int((net.bytes_recv - _sys_last_net.bytes_recv) / dt)
+            net_out_rate = int((net.bytes_sent - _sys_last_net.bytes_sent) / dt)
+
+    _sys_last_net = net
+    _sys_last_net_time = now
+
+    return {
+        "cpu_percent": cpu,
+        "memory_percent": round(mem.percent, 1),
+        "memory_used_mb": mem.used // (1024 * 1024),
+        "memory_total_mb": mem.total // (1024 * 1024),
+        "net_in_bytes_sec": max(net_in_rate, 0),
+        "net_out_bytes_sec": max(net_out_rate, 0),
+        "net_total_recv_mb": net.bytes_recv // (1024 * 1024),
+        "net_total_sent_mb": net.bytes_sent // (1024 * 1024),
     }
 
 
@@ -3023,35 +3062,86 @@ def start_scanner_thread():
     t.start()
 
 
+def _is_background_leader() -> bool:
+    """Garante que apenas UM worker uvicorn rode os background services.
+    Usa Redis SETNX como lock distribuído com TTL de 60s (renovado a cada 30s).
+    Ao reiniciar, limpa lock antigo para evitar que nenhum worker vire leader.
+    """
+    import random
+    import redis as _redis_mod
+    try:
+        _r = _redis_mod.from_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"), socket_connect_timeout=3)
+        pid = os.getpid()
+
+        # Limpa lock de instância anterior (pode existir do container antigo)
+        # Jitter evita que todos os workers deletem e façam SETNX ao mesmo tempo
+        _r.delete("bg:leader:lock")
+        time.sleep(random.uniform(0.0, 0.4))
+
+        acquired = _r.set("bg:leader:lock", pid, nx=True, ex=60)
+        if not acquired:
+            existing = _r.get("bg:leader:lock")
+            logger.info("[STARTUP] Worker %d: background já iniciado (leader=%s), apenas API ativa", pid, existing)
+            return False
+
+        # Renova o lock enquanto o processo estiver vivo
+        def _renew():
+            while True:
+                time.sleep(25)
+                try:
+                    _r.set("bg:leader:lock", pid, xx=True, ex=60)
+                except Exception:
+                    pass
+        threading.Thread(target=_renew, daemon=True).start()
+        logger.info("[STARTUP] Worker %d eleito como background leader", pid)
+        return True
+    except Exception as e:
+        logger.warning("[STARTUP] Redis indisponivel para leader election (%s), assumindo lider", e)
+        return True  # fallback: assume leader se Redis nao responder
+
+
 @app.on_event("startup")
 def on_startup():
-    logger.info(
-        "=== Scanner Internet v2 ===\n"
-        "    NetScanner: %s\n"
-        "    Workers: %s | Intervalo: %.1fs\n"
-        "    Shodan: %s | ip-api: %.1f req/s | IPinfo: %.1f req/s\n"
-        "    Vuln: %d workers | auto=%s | sev=%s\n"
-        "    Bounty: %s\n"
-        "    Log: %s | CORS: *",
-        NETWORK_SCANNER_ENABLED, NUM_SCANNER_WORKERS, SCAN_INTERVAL,
-        "OFF" if not SHODAN_ENABLED else f"{SHODAN_RPS:.0f} req/s",
-        IPAPI_RPS, IPINFO_RPS,
-        NUM_VULN_WORKERS, VULN_AUTO_SCAN, NUCLEI_SEVERITY, BOUNTY_MODE, LOG_LEVEL,
-    )
+    # init_db é rápido (apenas inicializa conexões) — pode rodar no event loop
     init_db()
-    if NETWORK_SCANNER_ENABLED:
-        start_scanner_thread()
-    else:
-        logger.info("[STARTUP] Scanner de rede desabilitado por config")
-    start_vuln_scanner()
-    start_bounty_system()
-    start_program_scorer()
-    start_interactsh_poller()
-    start_ct_monitor()
-    start_cve_monitor()
-    start_roi_tracker()
-    start_bounty_data_sync()
-    start_platform_watcher()
-    start_program_matcher_worker()
-    start_h1_auto_submit()
-    logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData + PlatformWatcher + ProgramMatcher + H1AutoSubmit rodando")
+    # O restante (leader election + start de background threads) roda em thread
+    # separada para não bloquear o event loop do uvicorn
+    def _deferred_startup():
+        logger.info(
+            "=== Scanner Internet v2 ===\n"
+            "    NetScanner: %s\n"
+            "    Workers: %s | Intervalo: %.1fs\n"
+            "    Shodan: %s | ip-api: %.1f req/s | IPinfo: %.1f req/s\n"
+            "    Vuln: %d workers | auto=%s | sev=%s\n"
+            "    Bounty: %s\n"
+            "    Log: %s | CORS: *",
+            NETWORK_SCANNER_ENABLED, NUM_SCANNER_WORKERS, SCAN_INTERVAL,
+            "OFF" if not SHODAN_ENABLED else f"{SHODAN_RPS:.0f} req/s",
+            IPAPI_RPS, IPINFO_RPS,
+            NUM_VULN_WORKERS, VULN_AUTO_SCAN, NUCLEI_SEVERITY, BOUNTY_MODE, LOG_LEVEL,
+        )
+
+        is_leader = _is_background_leader()
+
+        if NETWORK_SCANNER_ENABLED and is_leader:
+            start_scanner_thread()
+        elif not NETWORK_SCANNER_ENABLED:
+            logger.info("[STARTUP] Scanner de rede desabilitado por config")
+
+        if is_leader:
+            start_vuln_scanner()
+            start_bounty_system()
+            start_program_scorer()
+            start_interactsh_poller()
+            start_ct_monitor()
+            start_cve_monitor()
+            start_roi_tracker()
+            start_bounty_data_sync()
+            start_platform_watcher()
+            start_program_matcher_worker()
+            start_h1_auto_submit()
+            logger.info("API pronta em :5000 | VulnScanner + Bounty + Scorer + CT + CVE + ROI + BountyData + PlatformWatcher + ProgramMatcher + H1AutoSubmit rodando")
+        else:
+            logger.info("API pronta em :5000 | worker secundario (apenas HTTP)")
+
+    threading.Thread(target=_deferred_startup, daemon=True, name="startup").start()

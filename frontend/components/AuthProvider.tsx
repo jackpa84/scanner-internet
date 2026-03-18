@@ -26,6 +26,12 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setAuthenticated(isAuthenticated());
     setLoading(false);
+
+    const handleUnauthorized = () => {
+      setAuthenticated(false);
+    };
+    window.addEventListener("auth:unauthorized", handleUnauthorized);
+    return () => window.removeEventListener("auth:unauthorized", handleUnauthorized);
   }, []);
 
   const login = async (username: string, password: string) => {

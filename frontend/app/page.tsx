@@ -44,6 +44,8 @@ import {
   triggerH1AutoSubmit,
   type H1Stats,
   type H1QueueItem,
+  fetchSystemMetrics,
+  type SystemMetrics,
 } from "@/lib/api";
 import Modal from "@/components/Modal";
 
@@ -113,13 +115,19 @@ const TIER_COLORS: Record<string, string> = {
   D: "bg-red-500/15 text-red-400 border-red-500/25",
 };
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /* ═══════════════════════════════════════════════════════════════
    Card wrapper
    ═══════════════════════════════════════════════════════════════ */
 
-function Card({ children, className = "", title, accent, action, glow, onClick, clickHint }: {
+function Card({ children, className = "", title, accent, action, glow, onClick, clickHint, description }: {
   children: ReactNode; className?: string; title?: string; accent?: string;
-  action?: ReactNode; glow?: string; onClick?: () => void; clickHint?: string;
+  action?: ReactNode; glow?: string; onClick?: () => void; clickHint?: string; description?: string;
 }) {
   return (
     <div className={`rounded-xl border border-[var(--border)] bg-[var(--card)] p-4 card-glow h-full ${onClick ? 'cursor-pointer hover:border-[var(--accent)]/30 transition-all duration-200 group/card' : ''} ${className}`}
@@ -127,7 +135,10 @@ function Card({ children, className = "", title, accent, action, glow, onClick, 
       onClick={onClick}>
       {title && (
         <div className="flex items-center justify-between mb-3">
-          <h3 className={`text-xs font-semibold uppercase tracking-wider ${accent || "text-[var(--muted)]"}`}>{title}</h3>
+          <div>
+            <h3 className={`text-xs font-semibold uppercase tracking-wider ${accent || "text-[var(--muted)]"}`}>{title}</h3>
+            {description && <p className="text-[10px] text-[var(--muted)] mt-0.5 leading-relaxed font-normal normal-case tracking-normal">{description}</p>}
+          </div>
           <div className="flex items-center gap-2">
             {action}
             {onClick && (
@@ -187,8 +198,8 @@ function ReportSubmissionCard({ reportStats, roi }: { reportStats: SubmittedRepo
 
   return (
     <>
-      <Tooltip className="lg:col-span-4" text={"Clique para ver detalhes completos.\nStatus, severidade, plataformas\ne guia passo a passo."}>
-      <Card title="Report Submission" accent="text-violet-400" glow="rgba(139, 92, 246, 0.06)"
+      <Tooltip className="lg:col-span-6" text={"Clique para ver detalhes completos.\nStatus, severidade, plataformas\ne guia passo a passo."}>
+      <Card title="Report Submission" description="Status dos reports gerados: enviados, aceitos, falhados e pendentes por plataforma (H1, Bugcrowd, Intigriti). Clique para ver guia passo a passo." accent="text-violet-400" glow="rgba(139, 92, 246, 0.06)"
         action={<button onClick={() => setOpen(true)} className="text-[10px] text-violet-400 hover:text-violet-300 transition-colors">detalhes →</button>}>
         <div className="cursor-pointer" onClick={() => setOpen(true)}>
           <div className="flex items-center gap-3 mb-3">
@@ -384,6 +395,7 @@ export default function Home() {
   const [h1Submitting, setH1Submitting] = useState(false);
   const [h1Msg, setH1Msg] = useState("");
   const [activeModal, setActiveModal] = useState<string | null>(null);
+  const [sysMetrics, setSysMetrics] = useState<SystemMetrics | null>(null);
 
   const loadFast = useCallback(async () => {
     const results = await Promise.allSettled([
@@ -431,6 +443,16 @@ export default function Home() {
     const slowId = setInterval(loadSlow, 30000);
     return () => { clearInterval(fastId); clearInterval(slowId); };
   }, [loadFast, loadSlow]);
+
+  /* ── System metrics polling ── */
+  useEffect(() => {
+    const poll = async () => {
+      try { setSysMetrics(await fetchSystemMetrics()); } catch { /* silent */ }
+    };
+    poll();
+    const id = setInterval(poll, 5000);
+    return () => clearInterval(id);
+  }, []);
 
   /* ── Activity log polling ── */
   useEffect(() => {
@@ -498,7 +520,7 @@ export default function Home() {
                 <div className="w-9 h-9 rounded-xl bg-indigo-500/25 border border-indigo-400/30 flex items-center justify-center text-base shadow-lg shadow-indigo-500/20">🚀</div>
                 <div>
                   <h3 className="text-sm font-bold text-indigo-300 uppercase tracking-widest">Pipeline → HackerOne</h3>
-                  <p className="text-[10px] text-indigo-400/70 mt-1">Descubra, Analise, Reporte, Ganhe 💰</p>
+                  <p className="text-[10px] text-indigo-400/70 mt-1">Automação completa de bug bounty: descoberta de programas → recon → scan de vulns → geração de reports com IA → submissão ao H1 → bounty 💰</p>
                 </div>
               </div>
               <div className="flex items-center gap-3 sm:gap-4 text-[11px]">
@@ -634,7 +656,7 @@ export default function Home() {
                   <div className="w-8 h-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-base">🏆</div>
                   <div>
                     <span className="text-sm font-bold text-[var(--foreground)]">Trilha do Sucesso</span>
-                    <p className="text-[10px] text-[var(--muted)] mt-0.5">Progresso da jornada completa</p>
+                    <p className="text-[10px] text-[var(--muted)] mt-0.5">Funil completo da jornada: de programas descobertos até bounty recebido. Barras proporcionais ao volume em cada etapa com taxa de conversão entre etapas.</p>
                   </div>
                   <span className="text-[10px] font-semibold px-2.5 py-1 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
                     Jornada Completa
@@ -765,7 +787,7 @@ export default function Home() {
                 <div className="w-8 h-8 rounded-lg bg-slate-500/20 border border-slate-500/30 flex items-center justify-center text-base">📊</div>
                 <div>
                   <span className="text-sm font-bold text-[var(--foreground)]">Métricas de Desempenho</span>
-                  <p className="text-[10px] text-[var(--muted)] mt-0.5">Indicadores chave do pipeline</p>
+                  <p className="text-[10px] text-[var(--muted)] mt-0.5">KPIs do pipeline: cobertura de recon (% programas com recon feito), taxa de hosts vivos, cobertura de reports por vuln, taxa de envio e taxa de aceitação pelo triager.</p>
                 </div>
               </div>
 
@@ -836,7 +858,7 @@ export default function Home() {
                     <div>
                       <h3 className="text-sm font-bold text-violet-300 uppercase tracking-widest">Pipeline Auto-Submit → HackerOne</h3>
                       <p className="text-[10px] text-violet-400/70 mt-0.5">
-                        Ciclo completo: Vulnerabilidades confirmadas → Relatórios formatados → Submissão automática via API HackerOne
+                        Pipeline automático: vulns confirmadas → relatórios formatados com CVSS/PoC → validação de elegibilidade → deduplicação → submissão via API H1. Roda em batch a cada ciclo configurado.
                       </p>
                     </div>
                   </div>
@@ -1094,7 +1116,7 @@ export default function Home() {
                 <div className="w-8 h-8 rounded-lg bg-indigo-500/20 border border-indigo-500/30 flex items-center justify-center text-base">🎯</div>
                 <div>
                   <span className="text-sm font-bold text-[var(--foreground)]">Taxa de Conversão</span>
-                  <p className="text-[10px] text-[var(--muted)] mt-0.5">Funil de progressão — cada barra mostra a % em relação à etapa anterior</p>
+                  <p className="text-[10px] text-[var(--muted)] mt-0.5">Funil de progressão do pipeline — cada barra mostra a % em relação à etapa anterior. Identifica gargalos: onde mais volume é perdido na cadeia Programas→Aceitos.</p>
                 </div>
               </div>
 
@@ -1160,12 +1182,12 @@ export default function Home() {
             </div>
           </div>
 
-          {/* ══════════ ROW 2: Recon + Live Terminal + Report Submit ══════════ */}
+          {/* ══════════ ROW 2: Recon + Report Submit ══════════ */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-stretch">
 
             {/* Recon Pipeline */}
-            <Tooltip className="lg:col-span-4" text={"Pipeline de reconhecimento automático.\nRoda subfinder, crt.sh, httpx, dnsx, rDNS.\nDescobre subdomínios e verifica quais estão vivos.\nNovos targets são priorizados para scan."}>
-            <Card title="Recon Pipeline" accent="text-cyan-400" glow="rgba(6, 182, 212, 0.06)" onClick={() => setActiveModal('recon')} clickHint="ver recon">
+            <Tooltip className="lg:col-span-6" text={"Pipeline de reconhecimento automático.\nRoda subfinder, crt.sh, httpx, dnsx, rDNS.\nDescobre subdomínios e verifica quais estão vivos.\nNovos targets são priorizados para scan."}>
+            <Card title="Recon Pipeline" description="Enumeração automática de subdomínios com subfinder, crt.sh, httpx e rDNS. Descobre hosts vivos e os prioriza para scan de vulnerabilidades." accent="text-cyan-400" glow="rgba(6, 182, 212, 0.06)" onClick={() => setActiveModal('recon')} clickHint="ver recon">
               <div className="flex items-center gap-3 mb-3">
                 <Donut value={recon?.recons_completed ?? 0} total={bounty?.programs ?? 1} color="#06b6d4" size={56} />
                 <div>
@@ -1219,70 +1241,6 @@ export default function Home() {
             </Card>
             </Tooltip>
 
-            {/* ── Live Activity Terminal ── */}
-            <div className="lg:col-span-4 flex flex-col">
-              <div className="rounded-xl border border-emerald-500/20 bg-[#0a0e14] flex flex-col h-full overflow-hidden">
-                {/* title bar */}
-                <div className="flex items-center justify-between px-3 py-2 border-b border-emerald-500/15 bg-[#0d1117]">
-                  <div className="flex items-center gap-2">
-                    <span className="flex gap-1">
-                      <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
-                      <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
-                    </span>
-                    <span className="text-[10px] font-mono text-emerald-400/70 uppercase tracking-widest">Live API Activity</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`w-1.5 h-1.5 rounded-full ${logsPaused ? "bg-yellow-400" : "bg-emerald-400 animate-pulse"}`} />
-                    <button
-                      onClick={() => setLogsPaused(p => !p)}
-                      className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-emerald-500/20 text-emerald-400/60 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors"
-                    >
-                      {logsPaused ? "▶ resume" : "⏸ pause"}
-                    </button>
-                  </div>
-                </div>
-                {/* log area */}
-                <div ref={termRef} className="flex-1 overflow-y-auto px-3 py-2 font-mono text-[10px] leading-[1.6] min-h-[200px] max-h-[340px] scrollbar-thin scrollbar-thumb-emerald-500/20 scrollbar-track-transparent">
-                  {activityLogs.length === 0 ? (
-                    <div className="flex items-center justify-center h-full text-emerald-500/30 text-xs">
-                      <span className="animate-pulse">aguardando eventos...</span>
-                    </div>
-                  ) : (
-                    activityLogs.map((log, i) => {
-                      const lvl = log.level?.toUpperCase() ?? "INFO";
-                      const color =
-                        lvl === "ERROR" ? "text-red-400" :
-                        lvl === "WARNING" ? "text-amber-400" :
-                        lvl === "DEBUG" ? "text-slate-500" :
-                        "text-emerald-400/80";
-                      const tagColor =
-                        (log.tag ?? "").includes("VULN") ? "text-red-400 bg-red-500/10" :
-                        (log.tag ?? "").includes("SCAN") ? "text-cyan-400 bg-cyan-500/10" :
-                        (log.tag ?? "").includes("RECON") ? "text-blue-400 bg-blue-500/10" :
-                        (log.tag ?? "").includes("REPORT") ? "text-violet-400 bg-violet-500/10" :
-                        (log.tag ?? "").includes("CVE") ? "text-orange-400 bg-orange-500/10" :
-                        "text-slate-400 bg-slate-500/10";
-                      const time = log.ts ? new Date(log.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
-                      return (
-                        <div key={`${log.ts}-${i}`} className="flex gap-1.5 hover:bg-white/[0.02] rounded px-1 -mx-1">
-                          <span className="text-slate-600 shrink-0 select-none">{time}</span>
-                          <span className={`font-bold shrink-0 w-[42px] text-right ${color}`}>{lvl.slice(0, 4)}</span>
-                          {log.tag && <span className={`shrink-0 px-1 rounded text-[9px] font-semibold ${tagColor}`}>{log.tag}</span>}
-                          <span className="text-slate-300/90 break-all">{log.msg}</span>
-                        </div>
-                      );
-                    })
-                  )}
-                </div>
-                {/* status bar */}
-                <div className="px-3 py-1 border-t border-emerald-500/10 bg-[#0d1117] flex items-center justify-between">
-                  <span className="text-[9px] font-mono text-slate-600">{activityLogs.length} eventos</span>
-                  <span className="text-[9px] font-mono text-emerald-500/40">polling 3s</span>
-                </div>
-              </div>
-            </div>
-
             {/* Report Submission (expandable) */}
             <ReportSubmissionCard
               reportStats={reportStats}
@@ -1291,10 +1249,73 @@ export default function Home() {
 
           </div>
 
+          {/* ══════════ Live Activity Terminal — full width ══════════ */}
+          <div className="rounded-xl border border-emerald-500/20 bg-[#0a0e14] overflow-hidden">
+            {/* title bar */}
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-emerald-500/15 bg-[#0d1117]">
+              <div className="flex items-center gap-3">
+                <span className="flex gap-1">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
+                  <span className="w-2.5 h-2.5 rounded-full bg-emerald-500/80" />
+                </span>
+                <span className="text-[10px] font-mono text-emerald-400/70 uppercase tracking-widest">Live API Activity</span>
+                <span className="text-[9px] text-[var(--muted)] font-normal normal-case tracking-normal hidden sm:inline">— log em tempo real de recon, scans, vulns e reports. Atualiza a cada 3 segundos.</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className={`w-1.5 h-1.5 rounded-full ${logsPaused ? "bg-yellow-400" : "bg-emerald-400 animate-pulse"}`} />
+                <button
+                  onClick={() => setLogsPaused(p => !p)}
+                  className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-emerald-500/20 text-emerald-400/60 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors"
+                >
+                  {logsPaused ? "▶ resume" : "⏸ pause"}
+                </button>
+              </div>
+            </div>
+            {/* log area */}
+            <div ref={termRef} className="overflow-y-auto px-4 py-3 font-mono text-[10px] leading-[1.6] h-[260px] scrollbar-thin scrollbar-thumb-emerald-500/20 scrollbar-track-transparent">
+              {activityLogs.length === 0 ? (
+                <div className="flex items-center justify-center h-full text-emerald-500/30 text-xs">
+                  <span className="animate-pulse">aguardando eventos...</span>
+                </div>
+              ) : (
+                activityLogs.map((log, i) => {
+                  const lvl = log.level?.toUpperCase() ?? "INFO";
+                  const color =
+                    lvl === "ERROR" ? "text-red-400" :
+                    lvl === "WARNING" ? "text-amber-400" :
+                    lvl === "DEBUG" ? "text-slate-500" :
+                    "text-emerald-400/80";
+                  const tagColor =
+                    (log.tag ?? "").includes("VULN") ? "text-red-400 bg-red-500/10" :
+                    (log.tag ?? "").includes("SCAN") ? "text-cyan-400 bg-cyan-500/10" :
+                    (log.tag ?? "").includes("RECON") ? "text-blue-400 bg-blue-500/10" :
+                    (log.tag ?? "").includes("REPORT") ? "text-violet-400 bg-violet-500/10" :
+                    (log.tag ?? "").includes("CVE") ? "text-orange-400 bg-orange-500/10" :
+                    "text-slate-400 bg-slate-500/10";
+                  const time = log.ts ? new Date(log.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
+                  return (
+                    <div key={`${log.ts}-${i}`} className="flex gap-1.5 hover:bg-white/[0.02] rounded px-1 -mx-1">
+                      <span className="text-slate-600 shrink-0 select-none">{time}</span>
+                      <span className={`font-bold shrink-0 w-[42px] text-right ${color}`}>{lvl.slice(0, 4)}</span>
+                      {log.tag && <span className={`shrink-0 px-1 rounded text-[9px] font-semibold ${tagColor}`}>{log.tag}</span>}
+                      <span className="text-slate-300/90 break-all">{log.msg}</span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            {/* status bar */}
+            <div className="px-4 py-1.5 border-t border-emerald-500/10 bg-[#0d1117] flex items-center justify-between">
+              <span className="text-[9px] font-mono text-slate-600">{activityLogs.length} eventos</span>
+              <span className="text-[9px] font-mono text-emerald-500/40">polling 3s</span>
+            </div>
+          </div>
+
           {/* ══════════ ROW 3: AI Analyzer ══════════ */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
             <Tooltip className="lg:col-span-12" text={"Modelo de IA local (Ollama) para:\n• Gerar reports profissionais\n• Classificar true/false positives\n• Analisar HTTP responses\n• Encontrar vulnerability chains"}>
-            <Card title="AI Analyzer" accent="text-fuchsia-400" glow="rgba(192, 38, 211, 0.06)" onClick={() => setActiveModal('ai')} clickHint="ver AI">
+            <Card title="AI Analyzer" description="Motor de IA (OpenAI/Anthropic/Ollama) que gera reports profissionais, classifica true/false positives, calcula CVSS automaticamente e encontra vulnerability chains." accent="text-fuchsia-400" glow="rgba(192, 38, 211, 0.06)" onClick={() => setActiveModal('ai')} clickHint="ver AI">
               {aiStats ? (
                 <div className="space-y-2">
                   <div className="flex items-center gap-6 flex-wrap">
@@ -1336,7 +1357,7 @@ export default function Home() {
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-2 items-stretch">
 
           <Tooltip className="lg:col-span-8" text={"Programas e status do recon.\nClique Recon para disparar manualmente.\nO auto-recon roda a cada 4 horas.\nVerde = com targets, azul = rodando."}>
-          <Card title="Recon Live" accent="text-cyan-400" onClick={() => setActiveModal('recon-live')} clickHint="ver todos"
+          <Card title="Recon Live" description="Lista de todos os programas com status do recon em tempo real. Verde = com targets ativos, azul pulsando = rodando agora. Botão Recon dispara manualmente." accent="text-cyan-400" onClick={() => setActiveModal('recon-live')} clickHint="ver todos"
             action={
               <div className="flex items-center gap-2">
                 {allPrograms.filter(p => p.status === "reconning").length > 0 && (
@@ -1398,7 +1419,7 @@ export default function Home() {
 
           {/* Quick Actions */}
           <Tooltip className="lg:col-span-4" text={"Ações rápidas para o scanner.\nDescobrir programas, importar,\nscorear, verificar CT/CVE.\nRegistrar bounty recebido."}>
-          <Card title="Quick Actions" accent="text-blue-400" glow="rgba(59, 130, 246, 0.06)" onClick={() => setActiveModal('actions')} clickHint="ver ações">
+          <Card title="Quick Actions" description="Ações imediatas: descobrir novos programas no H1/Intigriti, pontuar programas por atratividade, checar Certificate Transparency logs, CVEs recentes e disparar recon em massa." accent="text-blue-400" glow="rgba(59, 130, 246, 0.06)" onClick={() => setActiveModal('actions')} clickHint="ver ações">
             <div className="space-y-1" onClick={e => e.stopPropagation()}>
               {[
                 { label: "🔍 Discover H1 Programs", fn: async () => { const r = await discoverH1Programs(); setActionMsg(`Found ${r.new_programs_found}, imported ${r.auto_imported}`); } },
@@ -1452,7 +1473,7 @@ export default function Home() {
 
             {/* Program Rankings */}
             <Tooltip className="lg:col-span-4" text={"Programas rankeados por atratividade.\nTier S/A = melhores oportunidades.\nScore considera: bounty, escopo,\ncompetição e targets ativos.\nUse 'Score Programs' para atualizar."}>
-            <Card title="Program Rankings" accent="text-[var(--accent-light)]" onClick={() => setActiveModal('rankings')} clickHint="ver ranking"
+            <Card title="Program Rankings" description="Programas ordenados por tier (S→D) com base em bounty máximo, escopo, competição e targets ativos. Use para focar nos programas mais lucrativos primeiro." accent="text-[var(--accent-light)]" onClick={() => setActiveModal('rankings')} clickHint="ver ranking"
               action={<span className="text-[10px] text-[var(--muted)]">{programs.length}</span>}
               glow="rgba(99, 102, 241, 0.06)">
               {/* Tier distribution mini */}
@@ -1498,7 +1519,7 @@ export default function Home() {
 
             {/* Recent Activity */}
             <Tooltip className="lg:col-span-4" text={"Mudanças de subdomínios detectadas.\n+N = novos subdomínios encontrados.\n-N = subdomínios que sumiram.\nSubdomínios novos são priorizados."}>
-            <Card title="Recent Activity" accent="text-lime-400" onClick={() => setActiveModal('activity')} clickHint="ver atividade">
+            <Card title="Recent Activity" description="Mudanças de subdomínios detectadas nos últimos recons. +N = novos subdomínios encontrados (alta prioridade para scan), -N = subdomínios que sumiram da infraestrutura." accent="text-lime-400" onClick={() => setActiveModal('activity')} clickHint="ver atividade">
               {/* Summary badges */}
               {changes.length > 0 && (
                 <div className="flex items-center gap-2 mb-2 text-[9px]">
@@ -1533,7 +1554,7 @@ export default function Home() {
 
             {/* Intelligence */}
             <Tooltip className="lg:col-span-4" text={"Inteligência de ROI e mercado.\n• Earnings Trend: ganhos mensais.\n• Top Earners: programas mais lucrativos.\n• Best Vuln Types: tipos que pagam mais.\n• CVEs recentes para explorar."}>
-            <Card title="Intelligence" accent="text-teal-400" glow="rgba(20, 184, 166, 0.06)" onClick={() => setActiveModal('intelligence')} clickHint="ver ROI">
+            <Card title="Intelligence" description="ROI e inteligência de mercado: ganhos mensais, programas mais lucrativos, tipos de vuln que pagam mais e CVEs recentes para explorar nos targets ativos." accent="text-teal-400" glow="rgba(20, 184, 166, 0.06)" onClick={() => setActiveModal('intelligence')} clickHint="ver ROI">
               {/* Earnings headline */}
               {roi && (roi.summary.total_earnings > 0 || roi.top_programs.length > 0) && (
                 <div className="mb-3 p-2 rounded-lg bg-green-500/5 border border-green-500/10 flex items-center justify-between">
@@ -1603,6 +1624,75 @@ export default function Home() {
             </Tooltip>
           </div>
 
+          {/* ═══ System Resources ═══ */}
+          <Card title="System Resources" description="Monitoramento em tempo real do servidor TencentCloud (8 vCPUs, 15GB RAM). CPU e RAM em gauge circular, tráfego de rede entrada/saída em bytes/s. Atualiza a cada 5s." accent="text-sky-400" glow="rgba(14, 165, 233, 0.06)">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {/* CPU */}
+              <div className="flex flex-col items-center gap-1">
+                <svg viewBox="0 0 40 40" className="w-12 h-12">
+                  <circle cx="20" cy="20" r="16" fill="none" stroke="var(--border)" strokeWidth="4"/>
+                  <circle cx="20" cy="20" r="16" fill="none" stroke="#38bdf8" strokeWidth="4"
+                    strokeDasharray={`${(sysMetrics?.cpu_percent ?? 0) * 1.005} 100.53`}
+                    strokeLinecap="round" strokeDashoffset="25.12" style={{transition:"stroke-dasharray 0.5s"}}/>
+                  <text x="20" y="24" textAnchor="middle" className="fill-white" style={{fontSize:"9px",fontWeight:700}}>
+                    {sysMetrics ? `${sysMetrics.cpu_percent.toFixed(0)}%` : "—"}
+                  </text>
+                </svg>
+                <span className="text-[10px] text-[var(--muted)]">CPU</span>
+              </div>
+              {/* RAM */}
+              <div className="flex flex-col items-center gap-1">
+                <svg viewBox="0 0 40 40" className="w-12 h-12">
+                  <circle cx="20" cy="20" r="16" fill="none" stroke="var(--border)" strokeWidth="4"/>
+                  <circle cx="20" cy="20" r="16" fill="none" stroke="#a78bfa" strokeWidth="4"
+                    strokeDasharray={`${(sysMetrics?.memory_percent ?? 0) * 1.005} 100.53`}
+                    strokeLinecap="round" strokeDashoffset="25.12" style={{transition:"stroke-dasharray 0.5s"}}/>
+                  <text x="20" y="24" textAnchor="middle" className="fill-white" style={{fontSize:"9px",fontWeight:700}}>
+                    {sysMetrics ? `${sysMetrics.memory_percent.toFixed(0)}%` : "—"}
+                  </text>
+                </svg>
+                <span className="text-[10px] text-[var(--muted)]">RAM</span>
+                {sysMetrics && (
+                  <span className="text-[9px] text-[var(--muted)]">{sysMetrics.memory_used_mb.toLocaleString()} / {sysMetrics.memory_total_mb.toLocaleString()} MB</span>
+                )}
+              </div>
+              {/* Net IN */}
+              <div className="flex flex-col gap-1 justify-center">
+                <div className="flex items-center gap-1.5">
+                  <svg className="w-3 h-3 text-emerald-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 14l-7 7m0 0l-7-7m7 7V3"/>
+                  </svg>
+                  <div>
+                    <div className="text-[10px] text-[var(--muted)]">Net IN</div>
+                    <div className="text-xs font-mono font-semibold text-emerald-400">
+                      {sysMetrics ? formatBytes(sysMetrics.net_in_bytes_sec) + "/s" : "—"}
+                    </div>
+                    <div className="text-[9px] text-[var(--muted)]">
+                      total {sysMetrics ? sysMetrics.net_total_recv_mb.toLocaleString() : "—"} MB
+                    </div>
+                  </div>
+                </div>
+              </div>
+              {/* Net OUT */}
+              <div className="flex flex-col gap-1 justify-center">
+                <div className="flex items-center gap-1.5">
+                  <svg className="w-3 h-3 text-orange-400 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18"/>
+                  </svg>
+                  <div>
+                    <div className="text-[10px] text-[var(--muted)]">Net OUT</div>
+                    <div className="text-xs font-mono font-semibold text-orange-400">
+                      {sysMetrics ? formatBytes(sysMetrics.net_out_bytes_sec) + "/s" : "—"}
+                    </div>
+                    <div className="text-[9px] text-[var(--muted)]">
+                      total {sysMetrics ? sysMetrics.net_total_sent_mb.toLocaleString() : "—"} MB
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
           {/* ═══ BugHunt Programs 🇧🇷 ═══ */}
           {bughuntPrograms.length > 0 && (
             <div className="rounded-xl border border-[var(--border)] bg-[var(--card)] overflow-hidden">
@@ -1610,7 +1700,7 @@ export default function Home() {
                 <div className="flex items-center gap-2">
                   <span className="text-base">🇧🇷</span>
                   <span className="text-xs font-semibold">BugHunt</span>
-                  <span className="text-[10px] text-[var(--muted)]">{bughuntPrograms.length} programas</span>
+                  <span className="text-[10px] text-[var(--muted)]">{bughuntPrograms.length} programas — plataforma brasileira de bug bounty. Clique para expandir e ver o escopo (domínios alvo) de cada programa.</span>
                 </div>
                 <a href="/bughunt" className="text-[10px] text-[var(--accent-light)] hover:underline">Ver dashboard →</a>
               </div>

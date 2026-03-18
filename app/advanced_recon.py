@@ -395,6 +395,126 @@ def run_paramspider(domain: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Arjun — active parameter discovery (bruteforce via wordlist)
+# ---------------------------------------------------------------------------
+ARJUN_TIMEOUT = int(os.getenv("ARJUN_TIMEOUT", "60"))
+ARJUN_WORDLIST = os.getenv("ARJUN_WORDLIST", "")  # deixa vazio = wordlist padrão do arjun
+
+
+def run_arjun(urls: list[str], chunk_size: int = 5) -> list[dict[str, Any]]:
+    """Discover hidden GET/POST parameters on alive URLs using Arjun.
+
+    Processes URLs in chunks to avoid memory issues.
+    Returns list of {"url": ..., "params": [...], "method": "GET|POST"}.
+    """
+    results: list[dict[str, Any]] = []
+
+    if not urls:
+        return results
+
+    # Filtra só URLs com potencial (evita estáticos)
+    candidates = [
+        u for u in urls
+        if not any(u.lower().endswith(ext) for ext in
+                   (".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico",
+                    ".css", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip"))
+    ][:50]  # limita para não explodir o pipeline
+
+    if not candidates:
+        return results
+
+    import tempfile
+
+    for i in range(0, len(candidates), chunk_size):
+        batch = candidates[i:i + chunk_size]
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("\n".join(batch))
+            urls_file = f.name
+
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            out_file = f.name
+
+        try:
+            cmd = [
+                "arjun",
+                "-i", urls_file,
+                "-oJ", out_file,
+                "--stable",
+                "-t", "10",
+                "--timeout", str(ARJUN_TIMEOUT),
+            ]
+            if ARJUN_WORDLIST:
+                cmd += ["-w", ARJUN_WORDLIST]
+
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=ARJUN_TIMEOUT * chunk_size + 30,
+            )
+
+            if os.path.exists(out_file) and os.path.getsize(out_file) > 2:
+                with open(out_file) as fj:
+                    data = json.load(fj)
+                # arjun output: {"url": {"GET": [...], "POST": [...]}}
+                for url, methods in data.items():
+                    for method, params in methods.items():
+                        if params:
+                            results.append({
+                                "url": url,
+                                "method": method,
+                                "params": params,
+                                "param_count": len(params),
+                            })
+                            logger.info("[ADV] Arjun %s %s: %d params (%s)",
+                                        method, url, len(params),
+                                        ", ".join(params[:5]))
+
+        except subprocess.TimeoutExpired:
+            logger.warning("[ADV] Arjun timeout no batch %d-%d", i, i + chunk_size)
+        except FileNotFoundError:
+            logger.debug("[ADV] arjun não instalado, pulando")
+            return results
+        except Exception as e:
+            logger.warning("[ADV] Arjun erro: %s", e)
+        finally:
+            for fp in (urls_file, out_file):
+                try:
+                    os.unlink(fp)
+                except OSError:
+                    pass
+
+    if results:
+        logger.info("[ADV] Arjun total: %d endpoints com parâmetros ocultos", len(results))
+
+    return results
+
+
+def arjun_findings_to_recon(arjun_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Converte resultados do arjun para o formato padrão de findings do recon."""
+    findings = []
+    for r in arjun_results:
+        findings.append({
+            "type": "hidden_parameters",
+            "severity": "medium",
+            "title": f"Parâmetros ocultos descobertos ({r['method']})",
+            "description": (
+                f"Arjun descobriu {r['param_count']} parâmetro(s) oculto(s) via "
+                f"{r['method']} em {r['url']}: {', '.join(r['params'][:10])}"
+            ),
+            "evidence": f"Params: {', '.join(r['params'][:20])}",
+            "url": r["url"],
+            "method": r["method"],
+            "params": r["params"],
+            "tool": "arjun",
+            "remediation": (
+                "Revise cada parâmetro descoberto para injeção (SQLi, XSS, SSRF, IDOR). "
+                "Parâmetros ocultos frequentemente contornam validações do frontend."
+            ),
+        })
+    return findings
+
+
+# ---------------------------------------------------------------------------
 # Orchestrator: run all advanced HTTP checks on a single URL
 # ---------------------------------------------------------------------------
 def run_advanced_http_checks(

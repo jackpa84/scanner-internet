@@ -65,7 +65,7 @@ async function apiFetch<T>(path: string, timeoutMs = 15000): Promise<T> {
     });
     if (res.status === 401) {
       clearToken();
-      if (typeof window !== "undefined") window.location.href = "/";
+      if (typeof window !== "undefined") window.dispatchEvent(new Event("auth:unauthorized"));
       throw new Error("Sessao expirada");
     }
     if (!res.ok) {
@@ -128,6 +128,22 @@ export interface HealthInfo {
 }
 
 export const fetchHealth = () => apiFetch<HealthInfo>("/api/health");
+
+// ---------------------------------------------------------------------------
+// System Metrics
+// ---------------------------------------------------------------------------
+export interface SystemMetrics {
+  cpu_percent: number;
+  memory_percent: number;
+  memory_used_mb: number;
+  memory_total_mb: number;
+  net_in_bytes_sec: number;
+  net_out_bytes_sec: number;
+  net_total_recv_mb: number;
+  net_total_sent_mb: number;
+}
+
+export const fetchSystemMetrics = () => apiFetch<SystemMetrics>("/api/system/metrics");
 
 // ---------------------------------------------------------------------------
 // DB Activity Log
